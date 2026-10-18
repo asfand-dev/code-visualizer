@@ -3,7 +3,8 @@ import { chord, ribbon, arc as d3arc, descending, select as d3select, zoom as d3
 import type { Core } from 'cytoscape';
 import { Grid3x3, Layers, Orbit } from 'lucide-react';
 import { useModel } from '../data/context';
-import { folderAtDepth, type Model } from '../data/model';
+import { areaName, defaultAreaDepth } from '../../../src/shared/architecture';
+import type { Model } from '../data/model';
 import { categorical } from '../lib/colors';
 import { fmtNum, plural } from '../lib/format';
 import { select, selectFile, useStore } from '../state/store';
@@ -20,16 +21,12 @@ interface Groups {
   cellEdges: Map<string, { source: string; target: string }[]>;
 }
 
-function groupName(dir: string, depth: number): string {
-  return folderAtDepth(dir, depth) || '(root)';
-}
-
 function buildGroups(model: Model, depth: number, typeOnly: boolean, tests: boolean): Groups {
   const files = model.files.filter((f) => f.scope !== 'context' && (tests || (f.kind !== 'test' && f.kind !== 'story')));
   const fileGroup = new Map<string, string>();
   const counts = new Map<string, { files: number; loc: number }>();
   for (const f of files) {
-    const g = groupName(f.dir, depth);
+    const g = areaName(f.dir, depth);
     fileGroup.set(f.id, g);
     const c = counts.get(g) ?? { files: 0, loc: 0 };
     c.files++;
@@ -84,17 +81,7 @@ function buildGroups(model: Model, depth: number, typeOnly: boolean, tests: bool
 
 /** Folder depth whose number of areas is closest to a readable ~12. */
 function defaultDepth(model: Model): number {
-  let best = 1;
-  let bestScore = Infinity;
-  for (let d = 1; d <= Math.max(1, model.maxDepth); d++) {
-    const count = new Set(model.files.filter((f) => f.kind !== 'test').map((f) => groupName(f.dir, d))).size;
-    const score = Math.abs(Math.log(Math.max(count, 1) / 12));
-    if (score < bestScore - 0.05) {
-      best = d;
-      bestScore = score;
-    }
-  }
-  return best;
+  return defaultAreaDepth(model.files, model.maxDepth);
 }
 
 function leftTruncate(text: string, max: number): string {

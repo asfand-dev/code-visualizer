@@ -1,0 +1,13 @@
+{
+  "rules": [
+    {
+      "name": "components-use-public-lib",
+      "from": "components/**",
+      "to": "lib/**",
+      "allow": ["lib/format.ts", "lib/types.ts", "lib/users-client.ts"],
+      "message": "Components may only import the public lib modules"
+    }
+  ],
+  "layers": ["app/**", "components/**", "lib/**"],
+  "check": { "maxCycles": 0 }
+}

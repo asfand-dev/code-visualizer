@@ -4,7 +4,8 @@ import { useModel } from './data/context';
 import { CommandPalette } from './components/CommandPalette';
 import { DetailPanel } from './components/DetailPanel';
 import { Sidebar, useNavEntries } from './components/Sidebar';
-import { setState, toggleTheme, useStore, type ViewId } from './state/store';
+import { dismissToast, setState, toggleTheme, useStore, type ViewId } from './state/store';
+import { SEVERITY_COLOR } from './components/LiveFeed';
 import { OverviewView } from './views/OverviewView';
 import { TourView } from './views/TourView';
 import { GraphView } from './views/GraphView';
@@ -16,8 +17,18 @@ import { RoutesView } from './views/RoutesView';
 import { FlowView } from './views/FlowView';
 import { PackagesView } from './views/PackagesView';
 import { InsightsView } from './views/InsightsView';
+import { TodayView } from './views/TodayView';
+import { ChangesView } from './views/ChangesView';
+import { SearchView } from './views/SearchView';
+import { ActivityView } from './views/ActivityView';
+import { recordVisit } from './state/personal';
+import { selectionKey } from './state/personal';
 
 const SUBTITLES: Record<ViewId, string> = {
+  today: 'Your daily starting point',
+  changes: 'What your work changes, affects and needs before review',
+  search: 'Full-text search across every file',
+  activity: 'Commits, people and who knows what',
   overview: 'Everything at a glance',
   tour: 'A guided walkthrough for newcomers',
   graph: 'How files depend on each other — zoom out for folders, in for files',
@@ -28,10 +39,10 @@ const SUBTITLES: Record<ViewId, string> = {
   routes: 'Pages, API endpoints and their handlers',
   flow: 'Function-level call graph',
   packages: 'External dependencies and how they are used',
-  insights: 'Cycles, hotspots, dead code and other findings',
+  insights: 'Health score, trends, hotspots, dead code and risks',
 };
 
-const FILL_VIEWS = new Set<ViewId>(['graph', 'architecture', 'structure', 'components', 'classes', 'routes', 'flow']);
+const FILL_VIEWS = new Set<ViewId>(['graph', 'architecture', 'structure', 'components', 'classes', 'routes', 'flow', 'search', 'activity', 'tour']);
 
 function isTyping(target: EventTarget | null): boolean {
   const el = target as HTMLElement | null;
@@ -46,9 +57,16 @@ export function App() {
   const mobileNav = useStore((s) => s.mobileNav);
   const paletteOpen = useStore((s) => s.paletteOpen);
   const selection = useStore((s) => s.selection);
+  const live = useStore((s) => s.live);
+  const toastMsg = useStore((s) => s.toast);
+  const liveOpenCount = useStore((s) => s.liveOpenCount);
   const entries = useNavEntries();
   const current = entries.find((e) => e.id === view) ?? entries[0];
-  const activeView = entries.some((e) => e.id === view) ? view : 'overview';
+  const activeView = entries.some((e) => e.id === view) ? view : 'today';
+
+  useEffect(() => {
+    if (selection && (selection.type === 'file' || selection.type === 'symbol' || selection.type === 'folder' || selection.type === 'route')) recordVisit(selectionKey(selection));
+  }, [selection]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
@@ -73,8 +91,9 @@ export function App() {
   }, [entries]);
 
   useEffect(() => {
-    document.title = `${model.data.project.name} · ${current.label} · Code Visualizer`;
-  }, [current.label, model.data.project.name]);
+    // live-guard: problems that appeared while `serve` runs and are still open, e.g. "(2) app · Today · Code Visualizer".
+    document.title = `${liveOpenCount > 0 ? `(${liveOpenCount}) ` : ''}${model.data.project.name} · ${current.label} · Code Visualizer`;
+  }, [current.label, model.data.project.name, liveOpenCount]);
 
   return (
     <div className={`app${collapsed ? ' nav-collapsed' : ''}${mobileNav ? ' mobile-nav' : ''}`}>
@@ -97,12 +116,22 @@ export function App() {
               <kbd>K</kbd>
             </span>
           </button>
+          {live && (
+            <span className={`live-badge desktop-only${live.connected ? '' : ' off'}`} title={live.connected ? 'Connected to code-visualizer serve — updates automatically' : 'Lost connection — retrying'}>
+              <span className="live-dot" />
+              {live.connected ? 'Live' : 'Offline'}
+            </span>
+          )}
           <button className="btn ghost icon" onClick={toggleTheme} title="Toggle theme" aria-label="Toggle theme">
             {theme === 'dark' ? <Sun size={17} /> : <Moon size={17} />}
           </button>
         </header>
-        <div className="workspace">
+        <div className={`workspace${selection ? ' panel-open' : ''}`}>
           <div className={`view${FILL_VIEWS.has(activeView) ? ' fill' : ''}`}>
+            {activeView === 'today' && <TodayView />}
+            {activeView === 'changes' && <ChangesView />}
+            {activeView === 'search' && <SearchView />}
+            {activeView === 'activity' && <ActivityView />}
             {activeView === 'overview' && <OverviewView />}
             {activeView === 'tour' && <TourView />}
             {activeView === 'graph' && <GraphView />}
@@ -119,6 +148,22 @@ export function App() {
         </div>
       </main>
       {paletteOpen && <CommandPalette />}
+      {toastMsg && (
+        <div className={`toast${toastMsg.tone ? ` tone-${toastMsg.tone}` : ''}`} key={toastMsg.id} role="status" style={toastMsg.tone ? { ['--tone' as string]: SEVERITY_COLOR[toastMsg.tone] } : undefined}>
+          <span className="toast-text">{toastMsg.text}</span>
+          {toastMsg.action && (
+            <button
+              className="btn sm"
+              onClick={() => {
+                toastMsg.action!.run();
+                dismissToast();
+              }}
+            >
+              {toastMsg.action.label}
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }

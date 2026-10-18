@@ -1,11 +1,14 @@
 import type { EditorId } from '../state/store';
 
-export const EDITORS: { id: EditorId; label: string }[] = [
+/** `liveOnly` editors have no URL scheme; `code-visualizer serve` launches them through their CLI. */
+export const EDITORS: { id: EditorId; label: string; liveOnly?: boolean }[] = [
   { id: 'vscode', label: 'VS Code' },
   { id: 'cursor', label: 'Cursor' },
   { id: 'windsurf', label: 'Windsurf' },
   { id: 'webstorm', label: 'WebStorm' },
+  { id: 'idea', label: 'IntelliJ IDEA', liveOnly: true },
   { id: 'zed', label: 'Zed' },
+  { id: 'sublime', label: 'Sublime Text', liveOnly: true },
   { id: 'none', label: 'Disabled' },
 ];
 

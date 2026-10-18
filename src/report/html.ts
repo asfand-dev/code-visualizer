@@ -23,15 +23,30 @@ function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 }
 
+let templateCache: { path: string; html: string } | undefined;
+
+function readTemplate(templatePath: string): string {
+  if (templateCache?.path === templatePath) return templateCache.html;
+  const html = fs.readFileSync(templatePath, 'utf8');
+  templateCache = { path: templatePath, html };
+  return html;
+}
+
+export interface RenderOptions {
+  /** Extra settings exposed to the UI as `window.__CV_LIVE__` (used by `code-visualizer serve`). */
+  live?: Record<string, unknown>;
+}
+
 /** Render the report HTML: the UI template with the analysis embedded as gzip+base64 JSON. */
-export function renderReportHtml(data: ReportData, templatePath = findTemplate()): string {
-  const template = fs.readFileSync(templatePath, 'utf8');
+export function renderReportHtml(data: ReportData, templatePath = findTemplate(), options: RenderOptions = {}): string {
+  const template = readTemplate(templatePath);
   const json = JSON.stringify(data);
   const encoded = zlib.gzipSync(Buffer.from(json, 'utf8'), { level: 9 }).toString('base64');
   const script = `<script id="cv-data" type="application/octet-stream" data-encoding="gzip-base64">${encoded}</script>`;
   const title = `${escapeHtml(data.project.name)}${data.scope.path ? ` · ${escapeHtml(data.scope.path)}` : ''} · Code Visualizer`;
   let html = template.replace(/<title>[^<]*<\/title>/, `<title>${title}</title>`);
-  html = html.includes(DATA_MARKER) ? html.replace(DATA_MARKER, () => script) : html.replace('</body>', () => `${script}</body>`);
+  const live = options.live ? `<script>window.__CV_LIVE__=${JSON.stringify(options.live).replace(/</g, '\\u003c')};</script>` : '';
+  html = html.includes(DATA_MARKER) ? html.replace(DATA_MARKER, () => live + script) : html.replace('</body>', () => `${live}${script}</body>`);
   return html;
 }
 

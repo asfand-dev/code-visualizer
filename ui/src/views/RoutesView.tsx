@@ -1,11 +1,11 @@
 import { useMemo, useState } from 'react';
 import type { ElementDefinition, LayoutOptions } from 'cytoscape';
-import { ChevronDown, ChevronRight, GitFork, Route as RouteIcon, Table2 } from 'lucide-react';
+import { ArrowLeftRight, ChevronDown, ChevronRight, GitFork, Route as RouteIcon, Table2 } from 'lucide-react';
 import { useModel } from '../data/context';
 import { symbolLabel, type Model } from '../data/model';
 import { METHOD_COLORS } from '../lib/colors';
 import { basename, plural } from '../lib/format';
-import { select, selectSymbol, useStore } from '../state/store';
+import { select, selectFile, selectSymbol, useStore } from '../state/store';
 import type { RouteInfo } from '../types';
 import { CyCanvas, cardSize } from '../components/CyCanvas';
 import { Empty, SearchInput, Segmented, Select } from '../components/ui';
@@ -133,7 +133,7 @@ export function RoutesView() {
   const [type, setType] = useState('all');
   const [method, setMethod] = useState('all');
   const [prefix, setPrefix] = useState('');
-  const [mode, setMode] = useState<'table' | 'flow'>('table');
+  const [mode, setMode] = useState<'table' | 'flow' | 'calls'>('table');
   const trie = useMemo(() => buildTrie(routes), [routes]);
   const types = [...new Set(routes.map((r) => r.type))];
   const methods = [...new Set(routes.map((r) => r.method))].sort();
@@ -178,6 +178,7 @@ export function RoutesView() {
             options={[
               { value: 'table', label: 'Table', icon: Table2 },
               { value: 'flow', label: 'Flow', icon: GitFork },
+              ...(model.data.apiCalls.length ? [{ value: 'calls' as const, label: `Client calls (${model.data.apiCalls.length})`, icon: ArrowLeftRight }] : []),
             ]}
           />
           <SearchInput value={search} onChange={setSearch} placeholder="Filter routes…" style={{ width: 220 }} />
@@ -191,7 +192,60 @@ export function RoutesView() {
           <span className="spacer" />
           <span className="small muted">{plural(filtered.length, 'route')}</span>
         </div>
-        {mode === 'table' ? (
+        {mode === 'calls' ? (
+          <div className="table-wrap" style={{ flex: 1 }}>
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Method</th>
+                  <th>Request</th>
+                  <th>Served by</th>
+                  <th>From</th>
+                  <th>Client</th>
+                </tr>
+              </thead>
+              <tbody>
+                {model.data.apiCalls
+                  .filter((c) => !search.trim() || `${c.method} ${c.url} ${c.file}`.toLowerCase().includes(search.trim().toLowerCase()))
+                  .map((c) => {
+                    const r = c.route ? model.routeById.get(c.route) : undefined;
+                    return (
+                      <tr key={c.id} onClick={() => (r ? select({ type: 'route', id: r.id }) : selectFile(c.file, c.line))}>
+                        <td>
+                          <MethodBadge method={c.method} />
+                        </td>
+                        <td className="mono small">{c.url}</td>
+                        <td className="small">
+                          {r ? (
+                            <span className="mono">
+                              {r.method} {r.path} <span className="faint">· {r.file}</span>
+                            </span>
+                          ) : c.external ? (
+                            <span className="badge">external · {c.external}</span>
+                          ) : (
+                            <span className="badge warn">no matching route</span>
+                          )}
+                        </td>
+                        <td className="mono tiny muted">
+                          <a
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (c.symbol) selectSymbol(c.symbol);
+                              else selectFile(c.file, c.line);
+                            }}
+                          >
+                            {c.symbol ? `${symbolLabel(c.symbol)} · ` : ''}
+                            {c.file}:{c.line}
+                          </a>
+                        </td>
+                        <td className="tiny muted">{c.client}</td>
+                      </tr>
+                    );
+                  })}
+              </tbody>
+            </table>
+          </div>
+        ) : mode === 'table' ? (
           <div className="table-wrap" style={{ flex: 1 }}>
             <table className="table">
               <thead>
@@ -200,6 +254,7 @@ export function RoutesView() {
                   <th>Path</th>
                   <th>Handler</th>
                   <th>Middleware</th>
+                  <th title="Code in this project that calls the route (fetch, axios, supertest…)">Called from</th>
                   <th>File</th>
                   <th>Framework</th>
                 </tr>
@@ -233,6 +288,15 @@ export function RoutesView() {
                       )}
                     </td>
                     <td className="small muted">{r.middlewares?.join(', ') ?? ''}</td>
+                    <td className="small">
+                      {(model.apiByRoute.get(r.id)?.length ?? 0) > 0 ? (
+                        <span className="badge info" title={model.apiByRoute.get(r.id)!.map((c) => `${c.file}:${c.line}`).join('\n')}>
+                          {model.apiByRoute.get(r.id)!.length} call{model.apiByRoute.get(r.id)!.length === 1 ? '' : 's'}
+                        </span>
+                      ) : r.type === 'api' && model.data.apiCalls.length ? (
+                        <span className="faint tiny">—</span>
+                      ) : null}
+                    </td>
                     <td className="mono tiny muted">
                       {r.file}
                       {r.line ? `:${r.line}` : ''}

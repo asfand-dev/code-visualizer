@@ -51,23 +51,26 @@ export const DEFAULT_IGNORES = [
   '**/*.chunk.js',
 ];
 
-const IGNORE_DIR_NAMES = new Set(
+export const IGNORE_DIR_NAMES = new Set(
   DEFAULT_IGNORES.filter((p) => p.endsWith('/**') && !p.includes('*.'))
     .map((p) => p.replace(/^\*\*\//, '').replace(/\/\*\*$/, ''))
     .filter((p) => !p.includes('/')),
 );
 
-const MAX_FILE_BYTES = 1_500_000;
+export const MAX_FILE_BYTES = 1_500_000;
 
 export interface DiscoveredFile {
   id: string;
   abs: string;
   ext: string;
   bytes: number;
+  mtimeMs: number;
 }
 
 export interface DiscoverOptions {
   exclude?: string[];
+  /** Project-relative directories to leave out entirely (nested fixture / example projects). */
+  excludeDirs?: string[];
   maxFiles?: number;
 }
 
@@ -76,9 +79,11 @@ export interface DiscoverResult {
   skipped: { id: string; reason: string }[];
   truncated: boolean;
   usedGit: boolean;
+  /** The `excludeDirs` that actually contained source files. */
+  excludedDirs: string[];
 }
 
-function extOf(file: string): string {
+export function extOf(file: string): string {
   if (file.endsWith('.d.ts')) return '.ts';
   return path.extname(file).toLowerCase();
 }
@@ -106,9 +111,19 @@ function isIgnoredByDefault(id: string): boolean {
   return false;
 }
 
+/**
+ * The path checks discovery applies (extension, default ignores, user excludes, excluded sub-project
+ * folders) — also used for overlay-only files.
+ */
+export function discoveryFilter(exclude: string[] = [], excludeDirs: string[] = []): (id: string) => boolean {
+  const exts = new Set(SOURCE_EXTENSIONS);
+  const userIgnore = ignore().add(exclude);
+  return (id) => exts.has(extOf(id)) && !isIgnoredByDefault(id) && !userIgnore.ignores(id) && !excludeDirs.some((d) => id.startsWith(`${d}/`));
+}
+
 export async function discoverFiles(root: string, options: DiscoverOptions = {}): Promise<DiscoverResult> {
   const exts = new Set(SOURCE_EXTENSIONS);
-  const userIgnore = ignore().add(options.exclude ?? []);
+  const accept = discoveryFilter(options.exclude);
   let candidates = await gitListFiles(root);
   // The folder may be git-ignored by a parent repository (e.g. a package inside node_modules).
   if (candidates && !candidates.some((c) => exts.has(extOf(c)))) candidates = undefined;
@@ -128,12 +143,17 @@ export async function discoverFiles(root: string, options: DiscoverOptions = {})
 
   const files: DiscoveredFile[] = [];
   const skipped: DiscoverResult['skipped'] = [];
+  const excludeDirs = options.excludeDirs ?? [];
+  const excludedDirs = new Set<string>();
   for (const raw of candidates) {
     const id = toPosix(raw);
+    if (!accept(id)) continue;
     const ext = extOf(id);
-    if (!exts.has(ext)) continue;
-    if (isIgnoredByDefault(id)) continue;
-    if (userIgnore.ignores(id)) continue;
+    const dir = excludeDirs.length ? excludeDirs.find((d) => id.startsWith(`${d}/`)) : undefined;
+    if (dir) {
+      excludedDirs.add(dir);
+      continue;
+    }
     const abs = path.join(root, id);
     let stat: fs.Stats;
     try {
@@ -146,7 +166,7 @@ export async function discoverFiles(root: string, options: DiscoverOptions = {})
       skipped.push({ id, reason: `larger than ${(MAX_FILE_BYTES / 1e6).toFixed(1)} MB` });
       continue;
     }
-    files.push({ id, abs, ext, bytes: stat.size });
+    files.push({ id, abs, ext, bytes: stat.size, mtimeMs: stat.mtimeMs });
   }
   files.sort((a, b) => a.id.localeCompare(b.id));
   const max = options.maxFiles ?? 20000;
@@ -158,7 +178,7 @@ export async function discoverFiles(root: string, options: DiscoverOptions = {})
     files.length = max;
     files.sort((a, b) => a.id.localeCompare(b.id));
   }
-  return { files, skipped, truncated, usedGit };
+  return { files, skipped, truncated, usedGit, excludedDirs: excludeDirs.filter((d) => excludedDirs.has(d)) };
 }
 
 function rank(id: string): number {

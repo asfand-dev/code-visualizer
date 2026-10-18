@@ -1,16 +1,21 @@
 import ts from 'typescript';
+import type { CloneTokens } from './clones.js';
 import type {
   ComponentInfo,
   EdgeKind,
   Language,
   MemberInfo,
+  NestedFunctionComplexity,
   ParamInfo,
   RouteFramework,
   RouteType,
   SymbolInfo,
   SymbolKind,
   TodoItem,
+  UrlVisit,
 } from '../shared/types.js';
+import { COMPONENT_FILE_RE } from '../shared/source-files.js';
+import { isTestFile } from './classify.js';
 
 /* -------------------------------------------------------------------------- */
 /*                                   Types                                    */
@@ -78,10 +83,36 @@ export interface SymbolFacts {
   fieldTypes?: Map<string, string>;
   /** For classes: the class name the facts belong to (for `this.` resolution). */
   owner?: string;
+  /**
+   * Where the callees of `calls` are called: callee → `[line, argc]` (at most 20 per callee; argc is -1
+   * when a spread argument is used). Rendered components are keyed `jsx:<Tag>`.
+   */
+  sites?: Map<string, CallSiteFact[]>;
+  /**
+   * Top-level names of the same file the symbol references without calling them: values (`columns.map`,
+   * `{ date: formatDate }`, `return [onClick]`) and callees that resolve to no edge. Query-core follows
+   * them so that editing a constant reaches the exported functions that read it.
+   */
+  values?: Set<string>;
+}
+
+/** `[line, argc]` of one call, `new` or JSX element (argc -1: a spread argument; 0 for JSX). */
+export type CallSiteFact = [line: number, argc: number];
+
+/** At most this many call sites are kept per callee and symbol. */
+export const MAX_SITES = 20;
+
+/** An HTTP request made from this file (`fetch('/api/users')`, `axios.post(…)`, `$fetch`, `useSWR`…). */
+export interface RawApiCall {
+  method: string;
+  url: string;
+  client: string;
+  line: number;
 }
 
 export interface ParsedFile {
   language: Language;
+  apiCalls: RawApiCall[];
   symbols: SymbolInfo[];
   facts: Map<string, SymbolFacts>;
   imports: RawImport[];
@@ -98,8 +129,20 @@ export interface ParsedFile {
   isGenerated: boolean;
   usesJsx: boolean;
   commonjs: boolean;
+  /**
+   * Top-level names used by module-level code (statements outside any declaration, such as `init();` or
+   * `app.get('/', handler)`): importing the file runs that code, so a change to them reaches every importer.
+   */
+  moduleRefs?: string[];
   /** Locally declared / imported names that look like router instances. */
   parseError?: string;
+  /**
+   * test-intelligence — test files only: URLs the test visits or requests (`page.goto`, `cy.visit`,
+   * `cy.request`, `request(app).get`, `request.post`…), so e2e specs map to the routes they exercise.
+   */
+  urlVisits?: UrlVisit[];
+  /** clone-radar: normalized tokens for clone detection (`cloneTokens`), cached with the parse result. */
+  tokens?: CloneTokens;
 }
 
 export interface ParseOptions {
@@ -378,36 +421,378 @@ function typeRefName(node: ts.TypeReferenceNode | ts.ExpressionWithTypeArguments
 }
 
 interface BodyScan {
+  /** Cyclomatic complexity of the scanned code itself (nested functions excluded). */
   complexity: number;
+  /** The most complex nested function (callback, inner helper), measured on its own; set when it branches. */
+  nested?: NestedFunctionComplexity;
+  /** Cognitive complexity (SonarSource rules); nested functions add nesting instead of being excluded. */
+  cognitive: number;
   calls: Map<string, number>;
+  /** Call sites per callee (same keys as `calls`, `jsx:<Tag>` for rendered components). */
+  sites: Map<string, CallSiteFact[]>;
   hooks: Set<string>;
   renders: Set<string>;
   contexts: Set<string>;
   refs: Set<string>;
+  /** Top-level names of the file referenced as values (see `SymbolFacts.values`). */
+  values: Set<string>;
   hasJsx: boolean;
   state: number;
 }
 
-function scanBody(node: ts.Node | undefined, sf: ts.SourceFile): BodyScan {
+const FUNCTION_KINDS = new Set<ts.SyntaxKind>([
+  ts.SyntaxKind.ArrowFunction,
+  ts.SyntaxKind.FunctionExpression,
+  ts.SyntaxKind.FunctionDeclaration,
+  ts.SyntaxKind.MethodDeclaration,
+  ts.SyntaxKind.GetAccessor,
+  ts.SyntaxKind.SetAccessor,
+  ts.SyntaxKind.Constructor,
+]);
+
+function unwrapParens(node: ts.Node | undefined): ts.Node | undefined {
+  while (node && ts.isParenthesizedExpression(node)) node = node.expression;
+  return node;
+}
+
+/**
+ * The functions a body returns before its real code starts, which belong to the symbol itself: curried
+ * arrows `(a) => (b) => { … }` and factories `function f(a) { …; return (req, res) => { … } }`.
+ */
+function ownLayers(body: ts.Node | undefined): Set<ts.Node> {
+  const layers = new Set<ts.Node>();
+  let node = unwrapParens(body);
+  for (let i = 0; node && i < 8; i++) {
+    if (ts.isBlock(node)) {
+      const last = node.statements[node.statements.length - 1];
+      node = last && ts.isReturnStatement(last) ? unwrapParens(last.expression) : undefined;
+      continue;
+    }
+    if (!ts.isArrowFunction(node) && !ts.isFunctionExpression(node)) break;
+    layers.add(node);
+    node = unwrapParens(node.body);
+  }
+  return layers;
+}
+
+/** Nodes that can change the cognitive complexity (`cognitiveIncrement` is 0 for everything else). */
+const COGNITIVE_KINDS = new Set<ts.SyntaxKind>([
+  ts.SyntaxKind.IfStatement,
+  ts.SyntaxKind.ConditionalExpression,
+  ts.SyntaxKind.ForStatement,
+  ts.SyntaxKind.ForInStatement,
+  ts.SyntaxKind.ForOfStatement,
+  ts.SyntaxKind.WhileStatement,
+  ts.SyntaxKind.DoStatement,
+  ts.SyntaxKind.SwitchStatement,
+  ts.SyntaxKind.CatchClause,
+  ts.SyntaxKind.BinaryExpression,
+  ts.SyntaxKind.BreakStatement,
+  ts.SyntaxKind.ContinueStatement,
+]);
+
+/** What a nested function is called, or what it is handed to: `helper`, `app.get callback`, `onClick handler`. */
+function nestedFunctionName(fn: ts.Node, sf: ts.SourceFile): string {
+  const named = (fn as ts.FunctionLikeDeclaration).name;
+  if (named && (ts.isIdentifier(named) || ts.isStringLiteral(named) || ts.isPrivateIdentifier(named))) return named.text;
+  const parent = fn.parent;
+  if (parent && (ts.isVariableDeclaration(parent) || ts.isPropertyAssignment(parent) || ts.isPropertyDeclaration(parent)) && parent.name && !ts.isArrayBindingPattern(parent.name) && !ts.isObjectBindingPattern(parent.name)) {
+    return nameText(parent.name as ts.PropertyName, sf);
+  }
+  if (parent && (ts.isCallExpression(parent) || ts.isNewExpression(parent)) && parent.expression !== fn) {
+    const callee = calleeName(parent.expression);
+    return callee ? `${callee} callback` : 'callback';
+  }
+  if (parent && ts.isJsxExpression(parent) && parent.parent && ts.isJsxAttribute(parent.parent)) return `${parent.parent.name.getText(sf)} handler`;
+  return 'callback';
+}
+
+/** Control structures whose blocks are one cognitive nesting level deeper. */
+const NESTING_KINDS = new Set<ts.SyntaxKind>([
+  ts.SyntaxKind.IfStatement,
+  ts.SyntaxKind.ConditionalExpression,
+  ts.SyntaxKind.ForStatement,
+  ts.SyntaxKind.ForInStatement,
+  ts.SyntaxKind.ForOfStatement,
+  ts.SyntaxKind.WhileStatement,
+  ts.SyntaxKind.DoStatement,
+  ts.SyntaxKind.SwitchStatement,
+  ts.SyntaxKind.CatchClause,
+]);
+
+/** One lookup per visited node instead of four set lookups (scanBody runs on every AST node). */
+const K_FUNCTION = 1;
+const K_DECISION = 2;
+const K_COGNITIVE = 4;
+const K_NESTING = 8;
+const KIND_FLAGS = new Uint8Array(ts.SyntaxKind.Count + 1);
+for (const [set, flag] of [
+  [FUNCTION_KINDS, K_FUNCTION],
+  [DECISION_KINDS, K_DECISION],
+  [COGNITIVE_KINDS, K_COGNITIVE],
+  [NESTING_KINDS, K_NESTING],
+] as const) {
+  for (const kind of set) KIND_FLAGS[kind] |= flag;
+}
+
+/** Cognitive increment of a node (structural +1 plus nesting, or a flat +1), SonarSource rules. */
+function cognitiveIncrement(n: ts.Node, parent: ts.Node | undefined, nesting: number): number {
+  switch (n.kind) {
+    case ts.SyntaxKind.IfStatement: {
+      const stmt = n as ts.IfStatement;
+      const elseIf = parent?.kind === ts.SyntaxKind.IfStatement && (parent as ts.IfStatement).elseStatement === n;
+      const plainElse = stmt.elseStatement && stmt.elseStatement.kind !== ts.SyntaxKind.IfStatement ? 1 : 0;
+      return (elseIf ? 1 : 1 + nesting) + plainElse;
+    }
+    case ts.SyntaxKind.ConditionalExpression:
+    case ts.SyntaxKind.ForStatement:
+    case ts.SyntaxKind.ForInStatement:
+    case ts.SyntaxKind.ForOfStatement:
+    case ts.SyntaxKind.WhileStatement:
+    case ts.SyntaxKind.DoStatement:
+    case ts.SyntaxKind.SwitchStatement:
+    case ts.SyntaxKind.CatchClause:
+      return 1 + nesting;
+    case ts.SyntaxKind.BinaryExpression: {
+      const op = (n as ts.BinaryExpression).operatorToken.kind;
+      if (!LOGICAL_OPERATORS.has(op)) return 0;
+      // One increment per sequence of the same operator: `a && b && c` → 1, `a && b || c` → 2.
+      return parent?.kind === ts.SyntaxKind.BinaryExpression && (parent as ts.BinaryExpression).operatorToken.kind === op ? 0 : 1;
+    }
+    case ts.SyntaxKind.BreakStatement:
+    case ts.SyntaxKind.ContinueStatement:
+      return (n as ts.BreakOrContinueStatement).label ? 1 : 0;
+    default:
+      return 0;
+  }
+}
+
+/** Whether `child` is a block nested inside the control structure `n` (raises the cognitive nesting level). */
+function nestsChild(n: ts.Node, child: ts.Node): boolean {
+  switch (n.kind) {
+    case ts.SyntaxKind.IfStatement: {
+      const stmt = n as ts.IfStatement;
+      return child === stmt.thenStatement || (child === stmt.elseStatement && child.kind !== ts.SyntaxKind.IfStatement);
+    }
+    case ts.SyntaxKind.ConditionalExpression:
+      return child === (n as ts.ConditionalExpression).whenTrue || child === (n as ts.ConditionalExpression).whenFalse;
+    case ts.SyntaxKind.SwitchStatement:
+      return child === (n as ts.SwitchStatement).caseBlock;
+    case ts.SyntaxKind.CatchClause:
+      return child === (n as ts.CatchClause).block;
+    default:
+      return child === (n as ts.IterationStatement).statement;
+  }
+}
+
+/**
+ * Line offset of a script block inside a single-file component (Vue / Svelte / Astro), keyed by the
+ * source file the block was parsed into, so call sites get line numbers of the whole file.
+ */
+const LINE_OFFSETS = new WeakMap<ts.SourceFile, number>();
+
+const TOP_NAMES = new WeakMap<ts.SourceFile, Set<string>>();
+
+/** Names declared by a source file's top-level statements (functions, classes, enums, variables). */
+function topLevelNames(sf: ts.SourceFile): Set<string> {
+  let names = TOP_NAMES.get(sf);
+  if (names) return names;
+  const found = new Set<string>();
+  const addBinding = (n: ts.BindingName): void => {
+    if (ts.isIdentifier(n)) found.add(n.text);
+    else for (const el of n.elements) if (!ts.isOmittedExpression(el)) addBinding(el.name);
+  };
+  for (const stmt of sf.statements) {
+    if ((ts.isFunctionDeclaration(stmt) || ts.isClassDeclaration(stmt) || ts.isEnumDeclaration(stmt)) && stmt.name) found.add(stmt.name.text);
+    else if (ts.isVariableStatement(stmt)) for (const d of stmt.declarationList.declarations) addBinding(d.name);
+  }
+  names = found;
+  TOP_NAMES.set(sf, names);
+  return names;
+}
+
+/**
+ * Whether an identifier reads a binding (`columns` in `columns.map`, `{ date: formatDate }`, `[onClick]`)
+ * rather than naming a property, declaration, label, type or JSX tag.
+ */
+function isReference(n: ts.Identifier, parent: ts.Node | undefined): boolean {
+  if (!parent) return true;
+  switch (parent.kind) {
+    case ts.SyntaxKind.PropertyAccessExpression:
+      return (parent as ts.PropertyAccessExpression).expression === n;
+    case ts.SyntaxKind.QualifiedName:
+      return (parent as ts.QualifiedName).left === n;
+    case ts.SyntaxKind.PropertyAssignment:
+    case ts.SyntaxKind.PropertyDeclaration:
+    case ts.SyntaxKind.PropertySignature:
+    case ts.SyntaxKind.MethodDeclaration:
+    case ts.SyntaxKind.MethodSignature:
+    case ts.SyntaxKind.GetAccessor:
+    case ts.SyntaxKind.SetAccessor:
+    case ts.SyntaxKind.EnumMember:
+    case ts.SyntaxKind.VariableDeclaration:
+    case ts.SyntaxKind.Parameter:
+    case ts.SyntaxKind.FunctionDeclaration:
+    case ts.SyntaxKind.FunctionExpression:
+    case ts.SyntaxKind.ClassDeclaration:
+    case ts.SyntaxKind.ClassExpression:
+    case ts.SyntaxKind.TypeParameter:
+    case ts.SyntaxKind.JsxAttribute:
+      return (parent as ts.NamedDeclaration).name !== n;
+    case ts.SyntaxKind.BindingElement:
+      return (parent as ts.BindingElement).name !== n && (parent as ts.BindingElement).propertyName !== n;
+    case ts.SyntaxKind.LabeledStatement:
+    case ts.SyntaxKind.BreakStatement:
+    case ts.SyntaxKind.ContinueStatement:
+    case ts.SyntaxKind.JsxOpeningElement:
+    case ts.SyntaxKind.JsxSelfClosingElement:
+    case ts.SyntaxKind.JsxClosingElement:
+    case ts.SyntaxKind.TypeReference:
+    case ts.SyntaxKind.InterfaceDeclaration:
+    case ts.SyntaxKind.TypeAliasDeclaration:
+    case ts.SyntaxKind.EnumDeclaration:
+    case ts.SyntaxKind.ModuleDeclaration:
+    case ts.SyntaxKind.ImportSpecifier:
+    case ts.SyntaxKind.ExportSpecifier:
+    case ts.SyntaxKind.ImportClause:
+    case ts.SyntaxKind.NamespaceImport:
+    case ts.SyntaxKind.MetaProperty:
+      return false;
+    default:
+      return true;
+  }
+}
+
+/** `module.exports = …`, `exports.x = …`, `module.exports.x = …`: export plumbing, not module-level code. */
+function isCommonJsExport(stmt: ts.Statement, sf: ts.SourceFile): boolean {
+  if (!ts.isExpressionStatement(stmt) || !ts.isBinaryExpression(stmt.expression) || stmt.expression.operatorToken.kind !== ts.SyntaxKind.EqualsToken) return false;
+  return /^(?:module\.exports|(?:module\.)?exports\.[A-Za-z_$][\w$]*)$/.test(stmt.expression.left.getText(sf).replace(/\s+/g, ''));
+}
+
+/** `Button` in `Button.displayName = …`, `Foo.defaults.size = …` or `cache = …`. */
+function assignedRoot(e: ts.Expression): ts.Identifier | undefined {
+  while (ts.isPropertyAccessExpression(e) || ts.isElementAccessExpression(e) || ts.isParenthesizedExpression(e)) e = e.expression;
+  return ts.isIdentifier(e) ? e : undefined;
+}
+
+interface ModuleRefs {
+  /** Top-level names that module-level statements (not declarations, imports or exports) use. */
+  used: Set<string>;
+  /** Names read by values assigned onto a top-level symbol (`Foo.defaultProps = { size: SIZE }`): part of that symbol. */
+  assigned: Map<string, Set<string>>;
+}
+
+function moduleLevelRefs(sf: ts.SourceFile): ModuleRefs {
+  const result: ModuleRefs = { used: new Set(), assigned: new Map() };
+  const top = topLevelNames(sf);
+  if (!top.size) return result;
+  const collect = (node: ts.Node, into: Set<string>, skip?: string): void => {
+    const visit = (n: ts.Node, parent: ts.Node): void => {
+      if (ts.isIdentifier(n)) {
+        if (top.has(n.text) && n.text !== skip && isReference(n, parent)) into.add(n.text);
+        return;
+      }
+      ts.forEachChild(n, (c) => visit(c, n));
+    };
+    visit(node, node.parent ?? sf);
+  };
+  for (const stmt of sf.statements) {
+    if (ts.isImportDeclaration(stmt) || ts.isExportDeclaration(stmt) || ts.isExportAssignment(stmt) || ts.isImportEqualsDeclaration(stmt)) continue;
+    if (ts.isFunctionDeclaration(stmt) || ts.isClassDeclaration(stmt) || ts.isInterfaceDeclaration(stmt) || ts.isTypeAliasDeclaration(stmt)) continue;
+    if (ts.isEnumDeclaration(stmt) || ts.isModuleDeclaration(stmt) || ts.isVariableStatement(stmt) || ts.isEmptyStatement(stmt)) continue;
+    if (isCommonJsExport(stmt, sf)) continue;
+    // `Button.displayName = 'Button'`: completes the declaration of Button rather than running code.
+    if (ts.isExpressionStatement(stmt) && ts.isBinaryExpression(stmt.expression) && stmt.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+      const root = assignedRoot(stmt.expression.left);
+      if (root && top.has(root.text)) {
+        let into = result.assigned.get(root.text);
+        if (!into) result.assigned.set(root.text, (into = new Set()));
+        collect(stmt.expression.right, into, root.text);
+        continue;
+      }
+    }
+    collect(stmt, result.used);
+  }
+  return result;
+}
+
+function addSite(sites: Map<string, CallSiteFact[]>, key: string, site: CallSiteFact): void {
+  const list = sites.get(key);
+  if (!list) sites.set(key, [site]);
+  else if (list.length < MAX_SITES) list.push(site);
+}
+
+/** Argument count of a call or `new` (-1 when an argument is spread). */
+function argCount(args: ts.NodeArray<ts.Expression> | undefined): number {
+  if (!args) return 0;
+  for (const a of args) if (ts.isSpreadElement(a)) return -1;
+  return args.length;
+}
+
+/**
+ * Collect calls, hooks, rendered components and type references of a body, and measure it.
+ *
+ * - Cyclomatic complexity counts decisions of the scanned code only. Nested functions (callbacks,
+ *   inner helpers) are functions of their own, so their decisions are not added — their calls still are.
+ * - Cognitive complexity (SonarSource): +1 per if / else / loop / switch / catch / ternary / sequence of
+ *   logical operators / labelled jump, plus the nesting level for nesting structures. Nested functions
+ *   raise the nesting level.
+ *
+ * `own` is the number of function layers that belong to the scanned symbol itself: 0 for a function
+ * body, 1 when the node wraps the symbol's function (`const h = middy(async () => …)`, class property
+ * arrows, Vue options objects). `ownFns` are functions that belong to it wherever they are (`ownLayers`).
+ *
+ * The most complex nested function is reported as `nested`, so inline route handlers and callbacks are
+ * still measured even though they are not symbols.
+ */
+function scanBody(node: ts.Node | undefined, sf: ts.SourceFile, own = 0, ownFns?: ReadonlySet<ts.Node>): BodyScan {
   const scan: BodyScan = {
     complexity: 1,
+    cognitive: 0,
     calls: new Map(),
+    sites: new Map(),
     hooks: new Set(),
     renders: new Set(),
     contexts: new Set(),
     refs: new Set(),
+    values: new Set(),
     hasJsx: false,
     state: 0,
   };
   if (!node) return scan;
+  const topNames = topLevelNames(sf);
+  const lineOffset = LINE_OFFSETS.get(sf) ?? 0;
+  const lineOf = (n: ts.Node): number => sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1 + lineOffset;
+  // Traversal context of the node being visited (saved and restored around its children). `frame` counts
+  // the decisions of the innermost nested function.
+  let parent: ts.Node | undefined;
+  let depth = 0;
+  let nesting = 0;
+  let frame: { complexity: number } | undefined;
   const visit = (n: ts.Node): void => {
-    if (DECISION_KINDS.has(n.kind)) scan.complexity++;
-    else if (ts.isBinaryExpression(n) && LOGICAL_OPERATORS.has(n.operatorToken.kind)) scan.complexity++;
+    const kind = n.kind;
+    const flags = KIND_FLAGS[kind];
+    let fnDepth = depth;
+    let childNesting = nesting;
+    let fnFrame = frame;
+    if (flags & K_FUNCTION && !ownFns?.has(n)) {
+      fnDepth = depth + 1;
+      if (fnDepth > own) {
+        childNesting = nesting + 1;
+        fnFrame = { complexity: 1 };
+      }
+    }
+    if (flags & K_DECISION || (kind === ts.SyntaxKind.BinaryExpression && LOGICAL_OPERATORS.has((n as ts.BinaryExpression).operatorToken.kind))) {
+      if (fnDepth <= own || !fnFrame) scan.complexity++;
+      else fnFrame.complexity++;
+    }
+    if (flags & K_COGNITIVE) scan.cognitive += cognitiveIncrement(n, parent, nesting);
 
     if (ts.isCallExpression(n)) {
       const name = calleeName(n.expression);
       if (name) {
         scan.calls.set(name, (scan.calls.get(name) ?? 0) + 1);
+        addSite(scan.sites, name, [lineOf(n), argCount(n.arguments)]);
         const short = name.startsWith('React.') ? name.slice(6) : name;
         if (HOOK_RE.test(short) || short === 'use') {
           scan.hooks.add(short);
@@ -419,7 +804,10 @@ function scanBody(node: ts.Node | undefined, sf: ts.SourceFile): BodyScan {
           scan.state++;
         }
         if ((short === 'createElement' || short === 'h') && n.arguments[0] && ts.isIdentifier(n.arguments[0])) {
-          if (/^[A-Z]/.test(n.arguments[0].text)) scan.renders.add(n.arguments[0].text);
+          if (/^[A-Z]/.test(n.arguments[0].text)) {
+            scan.renders.add(n.arguments[0].text);
+            addSite(scan.sites, `jsx:${n.arguments[0].text}`, [lineOf(n), 0]);
+          }
           scan.hasJsx = scan.hasJsx || short === 'createElement';
         }
       }
@@ -427,12 +815,14 @@ function scanBody(node: ts.Node | undefined, sf: ts.SourceFile): BodyScan {
       if (ts.isIdentifier(n.expression)) {
         const key = `new:${n.expression.text}`;
         scan.calls.set(key, (scan.calls.get(key) ?? 0) + 1);
+        addSite(scan.sites, key, [lineOf(n), argCount(n.arguments)]);
       }
     } else if (ts.isJsxSelfClosingElement(n) || ts.isJsxOpeningElement(n)) {
       scan.hasJsx = true;
       const tag = jsxTagName(n.tagName);
       if (tag && tag !== 'Fragment' && tag !== 'React.Fragment') {
         scan.renders.add(tag);
+        addSite(scan.sites, `jsx:${tag}`, [lineOf(n), 0]);
         // `<Ctx.Provider>` → context usage
         if (tag.endsWith('.Provider') || tag.endsWith('.Consumer')) scan.contexts.add(tag.split('.')[0]);
       }
@@ -441,8 +831,35 @@ function scanBody(node: ts.Node | undefined, sf: ts.SourceFile): BodyScan {
     } else if (ts.isTypeReferenceNode(n)) {
       const ref = typeRefName(n, sf);
       if (ref) scan.refs.add(ref);
+    } else if (kind === ts.SyntaxKind.Identifier) {
+      const text = (n as ts.Identifier).text;
+      if (topNames.has(text) && isReference(n as ts.Identifier, parent)) scan.values.add(text);
     }
-    ts.forEachChild(n, visit);
+    const savedParent = parent;
+    const savedDepth = depth;
+    const savedNesting = nesting;
+    const savedFrame = frame;
+    parent = n;
+    depth = fnDepth;
+    nesting = childNesting;
+    frame = fnFrame;
+    if (flags & K_NESTING) {
+      ts.forEachChild(n, (child) => {
+        nesting = nestsChild(n, child) ? childNesting + 1 : childNesting;
+        visit(child);
+      });
+    } else {
+      ts.forEachChild(n, visit);
+    }
+    parent = savedParent;
+    depth = savedDepth;
+    nesting = savedNesting;
+    frame = savedFrame;
+    if (fnFrame && fnFrame !== savedFrame && fnFrame.complexity > (scan.nested?.complexity ?? 1)) {
+      const line = lineOf(n);
+      const endLine = sf.getLineAndCharacterOfPosition(n.getEnd()).line + 1 + lineOffset;
+      scan.nested = { name: nestedFunctionName(n, sf), line, complexity: fnFrame.complexity, loc: endLine - line + 1 };
+    }
   };
   visit(node);
   return scan;
@@ -450,6 +867,21 @@ function scanBody(node: ts.Node | undefined, sf: ts.SourceFile): BodyScan {
 
 function addAll<T>(target: Set<T>, source: Iterable<T>): void {
   for (const item of source) target.add(item);
+}
+
+/** Add call sites to `target`, skipping ones it already has (a body can be scanned for two symbols). */
+function mergeSites(target: Map<string, CallSiteFact[]>, source: Map<string, CallSiteFact[]>): void {
+  for (const [key, list] of source) {
+    const existing = target.get(key);
+    if (!existing) {
+      target.set(key, list.slice(0, MAX_SITES));
+      continue;
+    }
+    for (const site of list) {
+      if (existing.length >= MAX_SITES) break;
+      if (!existing.some((s) => s[0] === site[0] && s[1] === site[1])) existing.push(site);
+    }
+  }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -539,6 +971,7 @@ class ScriptAnalyzer {
     const pendingNamed: RawLocalExport[] = [];
 
     for (const stmt of sf.statements) {
+      const before = this.out.symbols.length;
       try {
         if (ts.isImportDeclaration(stmt)) this.visitImport(stmt);
         else if (ts.isExportDeclaration(stmt)) this.visitExportDeclaration(stmt, pendingNamed);
@@ -555,9 +988,19 @@ class ScriptAnalyzer {
       } catch {
         // A single odd statement should never break the whole file.
       }
+      if (this.out.symbols.length > before) {
+        const deprecated = deprecationOf(stmt);
+        if (deprecated !== undefined) for (let i = before; i < this.out.symbols.length; i++) this.out.symbols[i].deprecated = deprecated;
+      }
     }
 
     this.walkAll();
+    // Single-file components: top-level script code is the component's own body, not module-level code.
+    if (!COMPONENT_FILE_RE.test(this.opts.id)) {
+      const refs = moduleLevelRefs(sf);
+      if (refs.used.size) this.out.moduleRefs = [...new Set([...(this.out.moduleRefs ?? []), ...refs.used])];
+      for (const [owner, names] of refs.assigned) if (names.size) addAll((this.factsFor(owner).values ??= new Set<string>()), names);
+    }
 
     // Resolve pending default / named exports against local symbols.
     const byName = new Map(this.out.symbols.map((s) => [s.name, s]));
@@ -798,7 +1241,9 @@ class ScriptAnalyzer {
   private mergeScan(key: string, scan: BodyScan): void {
     const facts = this.factsFor(key);
     for (const [name, count] of scan.calls) facts.calls.set(name, (facts.calls.get(name) ?? 0) + count);
+    if (scan.sites.size) mergeSites((facts.sites ??= new Map<string, CallSiteFact[]>()), scan.sites);
     addAll(facts.refs, scan.refs);
+    if (scan.values.size) addAll((facts.values ??= new Set<string>()), scan.values);
   }
 
   private params(list: ts.NodeArray<ts.ParameterDeclaration>): ParamInfo[] {
@@ -825,7 +1270,7 @@ class ScriptAnalyzer {
     anchor: ts.Node,
     extra: { exported?: boolean; isDefault?: boolean; tags?: string[]; propsType?: ts.TypeNode; forceComponent?: boolean } = {},
   ): SymbolInfo {
-    const scan = scanBody(fn.body, this.sf);
+    const scan = scanBody(fn.body, this.sf, 0, ownLayers(fn.body));
     const isHook = HOOK_RE.test(name);
     const isComponent =
       !isHook && PASCAL_RE.test(name) && (scan.hasJsx || !!extra.forceComponent || this.componentFramework === 'solid' && scan.hasJsx);
@@ -844,6 +1289,8 @@ class ScriptAnalyzer {
       params: this.params(fn.parameters),
       returnType: fn.type ? this.text(fn.type, 60) : undefined,
       complexity: scan.complexity,
+      cognitive: scan.cognitive,
+      nested: scan.nested,
       loc: endLine - line + 1,
       doc: jsDocSummary(anchor),
       tags: extra.tags?.length ? [...extra.tags] : undefined,
@@ -931,6 +1378,11 @@ class ScriptAnalyzer {
     facts.owner = name;
     facts.fieldTypes = new Map();
     let complexity = 1;
+    let cognitive = 0;
+    let nested: NestedFunctionComplexity | undefined;
+    const keepNested = (scan: BodyScan): void => {
+      if (scan.nested && scan.nested.complexity > (nested?.complexity ?? 1)) nested = scan.nested;
+    };
     let hasJsx = false;
     const renders = new Set<string>();
     const hooks = new Set<string>();
@@ -981,14 +1433,18 @@ class ScriptAnalyzer {
             if (typeName) facts.fieldTypes.set(p.name.text, typeName);
           }
         }
-        const scan = scanBody(m.body, sf);
+        const scan = scanBody(m.body, sf, 0, ownLayers(m.body));
         complexity += scan.complexity - 1;
+        cognitive += scan.cognitive;
+        keepNested(scan);
         this.mergeScan(`${name}.constructor`, scan);
         this.factsFor(`${name}.constructor`).owner = name;
       } else if (ts.isMethodDeclaration(m) || ts.isGetAccessorDeclaration(m) || ts.isSetAccessorDeclaration(m)) {
         const memberName = nameText(m.name, sf);
-        const scan = scanBody(m.body, sf);
+        const scan = scanBody(m.body, sf, 0, ownLayers(m.body));
         complexity += scan.complexity - 1;
+        cognitive += scan.cognitive;
+        keepNested(scan);
         hasJsx ||= scan.hasJsx;
         addAll(renders, scan.renders);
         addAll(hooks, scan.hooks);
@@ -1062,8 +1518,13 @@ class ScriptAnalyzer {
           line,
         });
         if (init) {
-          const scan = scanBody(init, sf);
+          // A property arrow (and what it returns) is the member's own body; in a wrapped value
+          // (`handle = middy(async () => …)`) the first function layer is.
+          const layers = ownLayers(init);
+          const scan = scanBody(init, sf, layers.size ? 0 : 1, layers);
           complexity += scan.complexity - 1;
+          cognitive += scan.cognitive;
+          keepNested(scan);
           hasJsx ||= scan.hasJsx;
           addAll(renders, scan.renders);
           const key = isFn ? `${name}.${memberName}` : name;
@@ -1098,6 +1559,8 @@ class ScriptAnalyzer {
       exported,
       isDefault: isDefault || undefined,
       complexity,
+      cognitive,
+      nested,
       loc: endLine - line + 1,
       doc: jsDocSummary(node),
       members,
@@ -1314,9 +1777,11 @@ class ScriptAnalyzer {
       });
       if (init) {
         this.tagFromInitializer(symbol, init);
-        const scan = scanBody(init, this.sf);
-        if (scan.calls.size || scan.refs.size) this.mergeScan(name, scan);
+        const scan = scanBody(init, this.sf, 1);
+        if (scan.calls.size || scan.refs.size || scan.values.size) this.mergeScan(name, scan);
         if (scan.complexity > 1) symbol.complexity = scan.complexity;
+        if (scan.cognitive > 0) symbol.cognitive = scan.cognitive;
+        if (scan.nested) symbol.nested = scan.nested;
         const callee = ts.isCallExpression(init) || ts.isNewExpression(init) ? calleeName(init.expression) : undefined;
         if (callee && /^(express|express\.Router|Router|fastify|Fastify|Koa|Hono|KoaRouter|polka|express\.default|new:Hono|new:Koa|new:Router|new:KoaRouter)$/.test(ts.isNewExpression(init) ? `new:${callee}` : callee)) {
           this.routerVars.add(name);
@@ -1422,7 +1887,7 @@ class ScriptAnalyzer {
         for (const prop of p.initializer.properties) if (prop.name) renders.push(nameText(prop.name, this.sf));
       }
     }
-    const scan = scanBody(obj, this.sf);
+    const scan = scanBody(obj, this.sf, 1);
     const line = this.line(anchor);
     const endLine = this.endLine(anchor);
     const symbol = this.pushSymbol({
@@ -1433,6 +1898,8 @@ class ScriptAnalyzer {
       exported: true,
       isDefault: forcedName ? undefined : true,
       complexity: scan.complexity,
+      cognitive: scan.cognitive,
+      nested: scan.nested,
       loc: endLine - line + 1,
       doc: jsDocSummary(anchor),
       component: { framework: 'vue', props, hooks: [...scan.hooks], renders, emits: emits.length ? emits : undefined },
@@ -1549,6 +2016,8 @@ class ScriptAnalyzer {
       if (ts.isCallExpression(node)) {
         this.visitCallForImports(node);
         this.visitCallForRoutes(node);
+        this.visitCallForApi(node);
+        if (this.isTest) this.visitCallForUrlVisit(node);
       } else if ((ts.isJsxSelfClosingElement(node) || ts.isJsxOpeningElement(node)) && ts.isIdentifier(node.tagName) && node.tagName.text === 'Route') {
         this.visitJsxRoute(node);
       } else if (ts.isObjectLiteralExpression(node) && this.clientRouterFramework) {
@@ -1556,6 +2025,138 @@ class ScriptAnalyzer {
       }
     });
     this.out.complexity += complexity + 1;
+  }
+
+  /** Collect outgoing HTTP calls so frontend code can be linked to backend routes. */
+  private visitCallForApi(node: ts.CallExpression): void {
+    const callee = node.expression;
+    const args = node.arguments;
+    let client: string | undefined;
+    let method: string | undefined;
+    let urlNode: ts.Expression | undefined;
+    let options: ts.Expression | undefined;
+    if (ts.isIdentifier(callee)) {
+      const name = callee.text;
+      if (FETCH_FUNCTIONS.has(name)) {
+        client = name;
+        urlNode = args[0];
+        options = args[1];
+        if (urlNode && ts.isArrayLiteralExpression(urlNode)) urlNode = urlNode.elements[0]; // useSWR(['/api/x', id])
+      } else if ((name === 'axios' || this.httpClientBindings().has(name)) && args[0]) {
+        client = name;
+        if (ts.isObjectLiteralExpression(args[0])) {
+          const props = objectProps(args[0], this.sf);
+          urlNode = props.get('url');
+          method = stringValue(props.get('method'))?.toUpperCase();
+        } else {
+          urlNode = args[0];
+          options = args[1];
+        }
+      }
+    } else if (ts.isPropertyAccessExpression(callee)) {
+      const verb = callee.name.text.toLowerCase();
+      if (!HTTP_CLIENT_VERBS.has(verb)) return;
+      const receiver = callee.expression;
+      // supertest: request(app).get('/api/users')
+      const supertest = ts.isCallExpression(receiver) && ts.isIdentifier(receiver.expression) && /^(request|supertest|agent)$/.test(receiver.expression.text);
+      const receiverName = supertest
+        ? 'supertest'
+        : ts.isIdentifier(receiver)
+          ? receiver.text
+          : ts.isPropertyAccessExpression(receiver)
+            ? receiver.name.text
+            : undefined;
+      if (!receiverName) return;
+      const isClient = supertest || HTTP_CLIENT_RECEIVER_RE.test(receiverName) || this.httpClientBindings().has(receiverName);
+      if (!isClient || this.routerVars.has(receiverName)) return;
+      // `api.get('/users', handler)` in a server file is a route definition, not a request.
+      const second = args[1];
+      if (second && (ts.isArrowFunction(second) || ts.isFunctionExpression(second)) && this.importsServerLib) return;
+      client = receiverName;
+      if (verb === 'request' && args[0] && ts.isObjectLiteralExpression(args[0])) {
+        const props = objectProps(args[0], this.sf);
+        urlNode = props.get('url');
+        method = stringValue(props.get('method'))?.toUpperCase();
+      } else {
+        urlNode = args[0];
+        options = args[verb === 'get' || verb === 'delete' || verb === 'head' ? 1 : 2];
+        if (verb !== 'fetch' && verb !== 'request') method = verb.toUpperCase();
+      }
+    }
+    if (!client || !urlNode) return;
+    let url = urlText(urlNode, this.sf);
+    if (!url) return;
+    // `${BASE_URL}/users` → treat as a path relative to an unknown base.
+    if (url.startsWith(':param/')) url = url.slice(6);
+    if (!url.startsWith('/') && !/^https?:\/\//.test(url)) return;
+    if (!method && options && ts.isObjectLiteralExpression(options)) method = stringValue(objectProps(options, this.sf).get('method'))?.toUpperCase();
+    this.out.apiCalls.push({ method: method ?? 'GET', url: clip(url, 200), client, line: this.line(node) });
+  }
+
+  // --- test-intelligence ---
+  private testFile?: boolean;
+
+  /** Whether this is a test file (only tests record URL visits). */
+  private get isTest(): boolean {
+    return (this.testFile ??= isTestFile(this.opts.id));
+  }
+
+  /**
+   * URLs a test visits or requests: `page.goto(url)`, `cy.visit(url)`, `cy.request([method,] url)`,
+   * `browser.url(url)`, `request(app).get(url)` (supertest) and `request.post(url)` (Playwright's API
+   * context). Template parts become `:param`, so `/users/${id}` matches `/users/[id]`.
+   */
+  private visitCallForUrlVisit(node: ts.CallExpression): void {
+    const callee = node.expression;
+    if (!ts.isPropertyAccessExpression(callee)) return;
+    const name = callee.name.text;
+    const receiver = callee.expression;
+    const receiverName = ts.isIdentifier(receiver)
+      ? receiver.text
+      : ts.isPropertyAccessExpression(receiver)
+        ? receiver.name.text
+        : ts.isCallExpression(receiver) && ts.isIdentifier(receiver.expression)
+          ? `${receiver.expression.text}()`
+          : undefined;
+    const args = node.arguments;
+    let urlNode: ts.Expression | undefined = args[0];
+    let method: string | undefined = 'GET';
+    if (name === 'goto' || (name === 'visit' && receiverName === 'cy') || (name === 'url' && receiverName === 'browser' && args.length === 1)) {
+      if (urlNode && ts.isObjectLiteralExpression(urlNode)) urlNode = objectProps(urlNode, this.sf).get('url');
+    } else if (name === 'request' && receiverName === 'cy') {
+      // cy.request(url) · cy.request(method, url) · cy.request({ method, url })
+      if (urlNode && ts.isObjectLiteralExpression(urlNode)) {
+        const props = objectProps(urlNode, this.sf);
+        urlNode = props.get('url');
+        method = stringValue(props.get('method'))?.toUpperCase() ?? 'GET';
+      } else if (args.length >= 2 && stringValue(args[0]) && /^[a-z]+$/i.test(stringValue(args[0])!)) {
+        method = stringValue(args[0])!.toUpperCase();
+        urlNode = args[1];
+      }
+    } else if (URL_VISIT_VERBS.has(name.toLowerCase()) && receiverName && URL_VISIT_CLIENT_RE.test(receiverName)) {
+      method = name.toUpperCase();
+    } else return;
+    if (!urlNode) return;
+    let url = urlText(urlNode, this.sf);
+    if (!url) return;
+    // `${baseURL}/users` → a path relative to an unknown base.
+    if (url.startsWith(':param/')) url = url.slice(6);
+    if (!url.startsWith('/') && !/^https?:\/\//.test(url)) return;
+    const visits = (this.out.urlVisits ??= []);
+    if (visits.length < 200) visits.push({ url: clip(url, 200), line: this.line(node), method });
+  }
+  // --- /test-intelligence ---
+
+  private clientBindingsCache?: Set<string>;
+
+  /** Local names bound to HTTP client libraries (axios, ky, ofetch…) or created with `axios.create()`. */
+  private httpClientBindings(): Set<string> {
+    if (this.clientBindingsCache) return this.clientBindingsCache;
+    const names = new Set<string>();
+    for (const [local, b] of this.bindings) if (HTTP_CLIENT_LIBS.has(b.specifier)) names.add(local);
+    for (const s of this.out.symbols) if (s.tags?.includes('client')) names.add(s.name);
+    this.clientBindingsCache = names;
+    return names;
   }
 
   private visitCallForImports(node: ts.CallExpression): void {
@@ -1846,6 +2447,36 @@ class ScriptAnalyzer {
   }
 }
 
+const FETCH_FUNCTIONS = new Set(['fetch', '$fetch', 'ofetch', 'useFetch', 'useLazyFetch', 'useSWR', 'useSWRImmutable', 'useSWRInfinite', 'ky', 'got', 'wretch', 'redaxios']);
+const HTTP_CLIENT_VERBS = new Set(['get', 'post', 'put', 'patch', 'delete', 'head', 'request', 'fetch']);
+/** test-intelligence: request verbs of test HTTP clients (supertest, Playwright's `request` fixture). */
+const URL_VISIT_VERBS = new Set(['get', 'post', 'put', 'patch', 'delete', 'head', 'options']);
+const URL_VISIT_CLIENT_RE = /^(request|supertest|agent)\(\)$|^(request|apiRequest|apiContext|requestContext)$/;
+const HTTP_CLIENT_RECEIVER_RE = /^(axios|https?|httpClient|http\w*Client|api|apiClient|\w*Api|client|\$http|\$axios|\$api|ky|got|fetcher|request|superagent|wretch|ofetch|httpService|apiService|restClient|instance)$/;
+const HTTP_CLIENT_LIBS = new Set(['axios', 'ky', 'ofetch', 'got', 'redaxios', 'wretch', 'superagent', 'node-fetch', 'cross-fetch', 'isomorphic-fetch', 'undici']);
+
+/** Render a URL expression with dynamic parts as `:param`. */
+function urlText(node: ts.Expression, sf: ts.SourceFile): string | undefined {
+  const e = skipWrappers(node);
+  if (ts.isStringLiteral(e) || ts.isNoSubstitutionTemplateLiteral(e)) return e.text;
+  if (ts.isTemplateExpression(e)) return e.head.text + e.templateSpans.map((span) => `:param${span.literal.text}`).join('');
+  if (ts.isBinaryExpression(e) && e.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+    const left = urlText(e.left, sf) ?? ':param';
+    const right = urlText(e.right, sf) ?? ':param';
+    return left + right;
+  }
+  return undefined;
+}
+
+/** Text of a `@deprecated` JSDoc tag ('' when it has no message), or undefined. */
+function deprecationOf(node: ts.Node): string | undefined {
+  const target = ts.isVariableStatement(node) ? node.declarationList.declarations[0] ?? node : node;
+  for (const tag of ts.getJSDocTags(target)) {
+    if (tag.tagName.text === 'deprecated') return clip(ts.getTextOfJSDocComment(tag.comment) ?? '', 160);
+  }
+  return undefined;
+}
+
 function isTypeKind(kind: SymbolKind): boolean {
   return kind === 'interface' || kind === 'type';
 }
@@ -1935,6 +2566,7 @@ function joinClientPath(parts: string[]): string {
 function emptyResult(language: Language): ParsedFile {
   return {
     language,
+    apiCalls: [],
     symbols: [],
     facts: new Map(),
     imports: [],
@@ -2007,6 +2639,7 @@ function fileDescription(text: string): string | undefined {
 
 function analyzeScript(text: string, kind: ts.ScriptKind, lineOffset: number, out: ParsedFile, opts: ParseOptions, framework: ComponentInfo['framework']): void {
   const sf = ts.createSourceFile(opts.id, text, ts.ScriptTarget.Latest, true, kind);
+  if (lineOffset) LINE_OFFSETS.set(sf, lineOffset);
   const analyzer = new ScriptAnalyzer(sf, out, lineOffset, { ...opts, componentFramework: framework });
   analyzer.run();
 }
@@ -2073,16 +2706,34 @@ function kebabToPascal(tag: string): string {
 
 const VUE_BUILTINS = new Set(['template', 'slot', 'component', 'transition', 'transition-group', 'keep-alive', 'teleport', 'suspense']);
 
-function templateComponents(template: string, kebab: boolean): string[] {
+/** Components used in markup, and where (`lineOffset`: lines of the file before `template`). */
+function templateComponents(template: string, kebab: boolean, lineOffset = 0): { names: string[]; sites: Map<string, CallSiteFact[]> } {
   const found = new Set<string>();
+  const sites = new Map<string, CallSiteFact[]>();
   const re = /<([A-Za-z][\w.-]*)/g;
   let m: RegExpExecArray | null;
+  let pos = 0;
+  let line = 1 + lineOffset;
   while ((m = re.exec(template))) {
     const tag = m[1];
-    if (/^[A-Z]/.test(tag)) found.add(tag);
-    else if (kebab && tag.includes('-') && !VUE_BUILTINS.has(tag)) found.add(kebabToPascal(tag));
+    const name = /^[A-Z]/.test(tag) ? tag : kebab && tag.includes('-') && !VUE_BUILTINS.has(tag) ? kebabToPascal(tag) : undefined;
+    if (!name) continue;
+    for (; pos < m.index; pos++) if (template.charCodeAt(pos) === 10) line++;
+    found.add(name);
+    addSite(sites, `jsx:${name}`, [line, 0]);
   }
-  return [...found];
+  return { names: [...found], sites };
+}
+
+/** Blank a block out but keep its line breaks, so the markup after it keeps its line numbers. */
+const blankOut = (block: string): string => block.replace(/[^\n]/g, ' ');
+
+/** Record where an SFC's markup renders components (on the component's own facts). */
+function addTemplateSites(out: ParsedFile, symbol: SymbolInfo, sites: Map<string, CallSiteFact[]>): void {
+  if (!sites.size) return;
+  const facts: SymbolFacts = out.facts.get(symbol.name) ?? { calls: new Map(), refs: new Set() };
+  mergeSites((facts.sites ??= new Map<string, CallSiteFact[]>()), sites);
+  out.facts.set(symbol.name, facts);
 }
 
 function sfcComponent(out: ParsedFile, id: string, framework: ComponentInfo['framework'], renders: string[], line: number, totalLines: number): SymbolInfo {
@@ -2109,19 +2760,25 @@ function sfcComponent(out: ParsedFile, id: string, framework: ComponentInfo['fra
 }
 
 /** Collect script-setup level facts (hooks, calls, props macros) into the SFC component. */
-function absorbScriptFacts(out: ParsedFile, symbol: SymbolInfo, setupText: string, kind: ts.ScriptKind, id: string, instanceScript = true): void {
+function absorbScriptFacts(out: ParsedFile, symbol: SymbolInfo, setupText: string, kind: ts.ScriptKind, id: string, instanceScript = true, lineOffset = 0): void {
   const sf = ts.createSourceFile(id, setupText, ts.ScriptTarget.Latest, true, kind);
+  if (lineOffset) LINE_OFFSETS.set(sf, lineOffset);
   const props = new Set(symbol.component!.props);
   const emits = new Set(symbol.component!.emits ?? []);
   const hooks = new Set(symbol.component!.hooks);
   const facts: SymbolFacts = out.facts.get(symbol.name) ?? { calls: new Map(), refs: new Set() };
-  let complexity = 1;
+  // Top-level script code is the component body; functions declared in it are measured on their own.
+  const body = scanBody(sf, sf);
+  const { complexity, cognitive } = body;
+  if (body.values.size) addAll((facts.values ??= new Set<string>()), body.values);
   const visit = (node: ts.Node): void => {
-    if (DECISION_KINDS.has(node.kind)) complexity++;
     if (ts.isCallExpression(node)) {
       const name = calleeName(node.expression);
       if (name) {
         facts.calls.set(name, (facts.calls.get(name) ?? 0) + 1);
+        const line = sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1 + lineOffset;
+        const sites = (facts.sites ??= new Map<string, CallSiteFact[]>());
+        if (!sites.get(name)?.some((s) => s[0] === line)) addSite(sites, name, [line, argCount(node.arguments)]);
         if (HOOK_RE.test(name)) hooks.add(name);
         if (name === 'defineProps' || name === 'withDefaults' || name === 'defineEmits' || name === '$props') {
           const target = name === 'defineEmits' ? emits : props;
@@ -2169,6 +2826,7 @@ function absorbScriptFacts(out: ParsedFile, symbol: SymbolInfo, setupText: strin
   symbol.component!.hooks = [...hooks];
   if (emits.size) symbol.component!.emits = [...emits];
   symbol.complexity = Math.max(symbol.complexity ?? 1, complexity);
+  if (cognitive > (symbol.cognitive ?? 0)) symbol.cognitive = cognitive;
 }
 
 function parseVue(text: string, out: ParsedFile, opts: ParseOptions): void {
@@ -2179,10 +2837,12 @@ function parseVue(text: string, out: ParsedFile, opts: ParseOptions): void {
   }
   // Remove script setup locals that were mistaken for exports; keep their symbols though.
   const templateMatch = text.match(/<template\b[^>]*>([\s\S]*)<\/template>/i);
-  const renders = templateMatch ? templateComponents(templateMatch[1], true) : [];
+  const templateStart = templateMatch ? (templateMatch.index ?? 0) + templateMatch[0].indexOf('>') + 1 : 0;
+  const template = templateMatch ? templateComponents(templateMatch[1], true, text.slice(0, templateStart).split('\n').length - 1) : undefined;
   const setup = blocks.find((b) => /\bsetup\b/.test(b.attrs));
-  const symbol = sfcComponent(out, opts.id, 'vue', renders, setup ? setup.lineOffset + 1 : 1, countLines(text));
-  for (const block of blocks) absorbScriptFacts(out, symbol, block.content, scriptKindFor('.js', langOf(block.attrs) ?? 'ts'), opts.id);
+  const symbol = sfcComponent(out, opts.id, 'vue', template?.names ?? [], setup ? setup.lineOffset + 1 : 1, countLines(text));
+  if (template) addTemplateSites(out, symbol, template.sites);
+  for (const block of blocks) absorbScriptFacts(out, symbol, block.content, scriptKindFor('.js', langOf(block.attrs) ?? 'ts'), opts.id, true, block.lineOffset);
   out.description = blocks[0] ? fileDescription(blocks[0].content) : undefined;
 }
 
@@ -2200,11 +2860,13 @@ function parseSvelte(text: string, out: ParsedFile, opts: ParseOptions): void {
       out.symbols = out.symbols.filter((s) => !exportedLets.has(s.name));
     }
   }
-  const markup = text.replace(/<script\b[\s\S]*?<\/script>/gi, '').replace(/<style\b[\s\S]*?<\/style>/gi, '');
-  const symbol = sfcComponent(out, opts.id, 'svelte', templateComponents(markup, false), 1, countLines(text));
+  const markup = text.replace(/<script\b[\s\S]*?<\/script>/gi, blankOut).replace(/<style\b[\s\S]*?<\/style>/gi, blankOut);
+  const template = templateComponents(markup, false);
+  const symbol = sfcComponent(out, opts.id, 'svelte', template.names, 1, countLines(text));
+  addTemplateSites(out, symbol, template.sites);
   for (const block of blocks) {
     const isModule = /context\s*=\s*["']module["']|\bmodule\b/.test(block.attrs);
-    absorbScriptFacts(out, symbol, block.content, scriptKindFor('.js', langOf(block.attrs) ?? 'ts'), opts.id, !isModule);
+    absorbScriptFacts(out, symbol, block.content, scriptKindFor('.js', langOf(block.attrs) ?? 'ts'), opts.id, !isModule, block.lineOffset);
   }
   out.description = blocks[0] ? fileDescription(blocks[0].content) : undefined;
 }
@@ -2212,17 +2874,25 @@ function parseSvelte(text: string, out: ParsedFile, opts: ParseOptions): void {
 function parseAstro(text: string, out: ParsedFile, opts: ParseOptions): void {
   const fm = text.match(/^\s*---\r?\n([\s\S]*?)\r?\n---/);
   let markup = text;
+  let fmOffset = 0;
+  // Lines before the markup (the frontmatter), so script blocks in the markup keep the file's line numbers.
+  let markupOffset = 0;
   if (fm) {
-    const offset = countLines(text.slice(0, (fm.index ?? 0) + fm[0].indexOf('\n') + 1)) - 1;
-    analyzeScript(fm[1], ts.ScriptKind.TS, offset, out, opts, 'astro');
-    markup = text.slice((fm.index ?? 0) + fm[0].length);
+    // Newlines before the frontmatter's first line (the opening `---` line included).
+    fmOffset = text.slice(0, (fm.index ?? 0) + fm[0].indexOf('\n') + 1).split('\n').length - 1;
+    analyzeScript(fm[1], ts.ScriptKind.TS, fmOffset, out, opts, 'astro');
+    const end = (fm.index ?? 0) + fm[0].length;
+    markupOffset = text.slice(0, end).split('\n').length - 1;
+    markup = text.slice(end);
   }
   for (const block of scriptBlocks(markup)) {
     // Client-side <script> tags in Astro run in the browser; analyze their imports too.
-    analyzeScript(block.content, ts.ScriptKind.TS, block.lineOffset, out, opts, 'astro');
+    analyzeScript(block.content, ts.ScriptKind.TS, block.lineOffset + markupOffset, out, opts, 'astro');
   }
-  const cleaned = markup.replace(/<script\b[\s\S]*?<\/script>/gi, '').replace(/<style\b[\s\S]*?<\/style>/gi, '');
-  const symbol = sfcComponent(out, opts.id, 'astro', templateComponents(cleaned, false), 1, countLines(text));
-  if (fm) absorbScriptFacts(out, symbol, fm[1], ts.ScriptKind.TS, opts.id);
+  const cleaned = markup.replace(/<script\b[\s\S]*?<\/script>/gi, blankOut).replace(/<style\b[\s\S]*?<\/style>/gi, blankOut);
+  const template = templateComponents(cleaned, false, markupOffset);
+  const symbol = sfcComponent(out, opts.id, 'astro', template.names, 1, countLines(text));
+  addTemplateSites(out, symbol, template.sites);
+  if (fm) absorbScriptFacts(out, symbol, fm[1], ts.ScriptKind.TS, opts.id, true, fmOffset);
   out.description = fm ? fileDescription(fm[1]) : undefined;
 }

@@ -12,6 +12,27 @@ export function isTestFile(id: string): boolean {
   return TEST_DIR_RE.test(id) || TEST_FILE_RE.test(id);
 }
 
+/**
+ * Tool configuration files (`vite.config.ts`, `jest.setup.js`, `.eslintrc.cjs`). A plain `config.ts`
+ * is application code, not a tool config.
+ */
+export function isConfigFile(id: string): boolean {
+  const base = id.split('/').pop() ?? id;
+  return CONFIG_NAMES.test(base) || TOOL_CONFIG_VARIANT.test(base) || /^\.[\w-]+rc\.[cm]?[jt]s$/.test(base) || /^[\w.-]+\.config\.[cm]?[jt]s$/.test(base);
+}
+
+/** Per-environment variants of build / test tool configs: `webpack.config.prod.js`, `rollup.config.dev.mjs`. */
+const TOOL_CONFIG_VARIANT =
+  /^(webpack|rollup|vite|vitest|tsup|tsdown|esbuild|rspack|rsbuild|jest|babel|playwright|cypress|karma|electron\.vite|electron-builder|unbuild)\.config(\.[\w-]+)+\.[cm]?[jt]s$/;
+
+/** A file defines a React-style context: it calls `createContext`. */
+function createsContext(parsed: ParsedFile): boolean {
+  for (const facts of parsed.facts.values()) {
+    for (const callee of facts.calls.keys()) if (callee === 'createContext' || callee === 'React.createContext') return true;
+  }
+  return false;
+}
+
 function dirHas(id: string, re: RegExp): boolean {
   return re.test(`/${id}`);
 }
@@ -26,7 +47,7 @@ export function classifyFile(id: string, parsed: ParsedFile, role: FileRole | un
   if (role === 'route') return 'route';
   if (role === 'middleware') return 'middleware';
   if (id.endsWith('.d.ts')) return 'types';
-  if (CONFIG_NAMES.test(base) || /^\.[\w-]+rc\.[cm]?[jt]s$/.test(base) || /\.config\.[cm]?[jt]s$/.test(base)) return 'config';
+  if (isConfigFile(id)) return 'config';
 
   const symbols = parsed.symbols;
   const tags = new Set(symbols.flatMap((s) => s.tags ?? []));
@@ -37,8 +58,11 @@ export function classifyFile(id: string, parsed: ParsedFile, role: FileRole | un
   const serverRoutes = parsed.routes.filter((r) => r.type === 'api' || r.type === 'middleware');
   const clientRoutes = parsed.routes.filter((r) => r.type === 'page' || r.type === 'layout');
 
-  if (main.length > 0 && runtime.length === 0) return 'types';
-  if (tags.has('context') || /context\.[jt]sx?$/i.test(base) || dirHas(id, /\/(contexts?|providers?)\//)) return 'context';
+  // Only types exported and no runtime code of its own (a server exporting one type is not a type module).
+  if (main.length > 0 && runtime.length === 0 && symbols.every((s) => s.kind === 'interface' || s.kind === 'type')) return 'types';
+  // Context by name / folder only for UI code (`ThemeContext.tsx`), never for `commands/context.ts` or Nest providers.
+  const ui = /\.[jt]sx$/.test(base) || parsed.usesJsx;
+  if (tags.has('context') || createsContext(parsed) || (ui && (/context\.[jt]sx?$/i.test(base) || dirHas(id, /\/(contexts?|providers?)\//)))) return 'context';
   if (tags.has('store') || dirHas(id, /\/(store|stores|slices|redux|reducers|state|atoms|signals|pinia|vuex)\//) || /(store|slice|reducer)\.[jt]sx?$/i.test(base)) return 'store';
   if (tags.has('controller') || /\.controller\.[jt]s$/.test(base) || dirHas(id, /\/controllers?\//)) return 'controller';
   if (tags.has('resolver') || /\.resolver\.[jt]s$/.test(base)) return 'controller';

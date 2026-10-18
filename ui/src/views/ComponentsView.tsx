@@ -127,7 +127,7 @@ export function ComponentsView() {
     <div className="split" style={{ flex: 1, minHeight: 0 }}>
       <div className="split-side">
         <div className="side-head">
-          <SearchInput value={search} onChange={setSearch} placeholder={`Search ${comps.length} components…`} />
+          <SearchInput value={search} onChange={setSearch} placeholder={`Search ${plural(comps.length, 'component')}…`} />
           <div className="row nowrap" style={{ justifyContent: 'space-between' }}>
             <span className="tiny muted">
               {plural(comps.length, 'component')} · {plural(roots, 'root')}

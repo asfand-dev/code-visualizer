@@ -1,0 +1,10 @@
+# Fallback owner for everything
+*                @acme/platform
+
+# Areas (later rules win over earlier ones)
+/app/            @acme/web
+/app/api/        @acme/backend
+/components/     @acme/web
+/lib/            @acme/backend
+/lib/billing.ts  @acme/payments billing-lead@acme.dev
+*.test.ts        @acme/qa

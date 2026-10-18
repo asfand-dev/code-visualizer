@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
   ArrowDownRight,
   ArrowUpRight,
@@ -13,15 +13,30 @@ import {
   Route as RouteIcon,
   Workflow,
   X,
+  Bot,
+  ListPlus,
+  Pin,
+  PinOff,
+  StickyNote,
+  GitPullRequestArrow,
+  Users,
 } from 'lucide-react';
+import { fileContextMarkdown } from '../../../src/shared/markdown';
+import { fetchBlame, liveConfig, openInEditor, type BlameRange } from '../data/live';
+import { copyText } from '../lib/download';
+import { addTourStep, selectionKey, setNote, togglePin, usePersonal } from '../state/personal';
+import { Avatar, DiffView, PlusMinus, StatusBadge } from './companion';
 import { useModel } from '../data/context';
-import { fileOfSymbolId, symbolLabel, transitive, type Model } from '../data/model';
+import { fileOfSymbolId, symbolLabel, symbolRef, transitive, usesOf, type Model } from '../data/model';
+import { routeTestReach, testEvidence, type UseSite, type UsesResult } from '../../../src/shared/query';
 import { KIND_META, METHOD_COLORS, SYMBOL_META } from '../lib/colors';
 import { EDITORS, editorUrl } from '../lib/editor';
 import { basename, fmtNum, pct, plural, timeAgo } from '../lib/format';
-import { select, selectFile, selectSymbol, setState, showFlow, showInGraph, useStore, type EditorId } from '../state/store';
+import { select, selectFile, selectSymbol, setState, showFlow, showInGraph, toast, useStore, type EditorId, type Selection } from '../state/store';
 import type { FileInfo, MemberInfo, ParamInfo, SymbolEdge, SymbolInfo } from '../types';
 import { CodeView, sliceLines } from './CodeView';
+import { SimilarCode } from './Clones';
+import { familiesOf } from '../../../src/shared/clones';
 import { KIND_ICONS, SYMBOL_ICONS } from './icons';
 import { BarList, CopyButton, Empty, FileChip, KindBadge, KindDot, SymbolIcon, Tabs } from './ui';
 
@@ -107,15 +122,30 @@ function EditorButton({ file, line }: { file: string; line?: number }) {
   const editor = useStore((s) => s.editor);
   const url = editorUrl(editor, model.data.project.rootPath, file, line);
   const label = EDITORS.find((e) => e.id === editor)?.label ?? 'editor';
+  const live = !!liveConfig();
+  const options = EDITORS.filter((e) => live || !e.liveOnly || e.id === editor);
   return (
     <span className="row nowrap" style={{ gap: 4 }}>
-      {url && (
-        <a className="btn sm" href={url} title={`Open in ${label}`}>
+      {editor !== 'none' && (url || live) && (
+        <a
+          className="btn sm"
+          href={url ?? '#'}
+          title={`Open in ${label}`}
+          onClick={async (e) => {
+            if (!live) return;
+            // The live server can launch the editor directly (no browser prompt).
+            e.preventDefault();
+            const ok = await openInEditor(file, line, editor);
+            if (ok) return;
+            if (url) window.location.href = url;
+            else toast(`Could not start ${label}. Is its command-line launcher on your PATH?`);
+          }}
+        >
           <ExternalLink size={13} /> {label}
         </a>
       )}
       <select className="select" style={{ height: 26, fontSize: 12, padding: '0 22px 0 6px', width: 26, backgroundPosition: 'right 6px center' }} value={editor} onChange={(e) => setState({ editor: e.target.value as EditorId })} title="Choose editor">
-        {EDITORS.map((e) => (
+        {options.map((e) => (
           <option key={e.id} value={e.id}>
             {e.label}
           </option>
@@ -125,11 +155,170 @@ function EditorButton({ file, line }: { file: string; line?: number }) {
   );
 }
 
+/** A small "open in editor" icon for one file:line (call sites, imports). */
+function EditorLink({ file, line }: { file: string; line?: number }) {
+  const model = useModel();
+  const editor = useStore((s) => s.editor);
+  const url = editorUrl(editor, model.data.project.rootPath, file, line);
+  const live = !!liveConfig();
+  if (editor === 'none' || (!url && !live)) return null;
+  const label = EDITORS.find((e) => e.id === editor)?.label ?? 'editor';
+  return (
+    <a
+      className="btn ghost icon sm"
+      href={url ?? '#'}
+      title={`Open ${file}:${line ?? 1} in ${label}`}
+      aria-label={`Open ${file}:${line ?? 1} in ${label}`}
+      onClick={async (e) => {
+        e.stopPropagation();
+        if (!live) return;
+        e.preventDefault();
+        if (await openInEditor(file, line, editor)) return;
+        if (url) window.location.href = url;
+        else toast(`Could not start ${label}. Is its command-line launcher on your PATH?`);
+      }}
+    >
+      <ExternalLink size={12} />
+    </a>
+  );
+}
+
+/** `default, { a, b }`, or `* (whole module)` for namespace / CommonJS imports. */
+function importedNames(names: string[] | undefined): string {
+  const named = (names ?? []).filter((n) => n !== '*' && n !== 'default');
+  const parts = [names?.includes('default') ? 'default' : '', named.length ? `{ ${named.join(', ')} }` : ''].filter(Boolean);
+  return parts.length ? parts.join(', ') : '* (whole module)';
+}
+
+const USE_KIND_LABEL: Record<UseSite['kind'], string> = { import: 'import', reexport: 're-export', call: 'call', render: 'render', new: 'new', http: 'HTTP' };
+
+const REF_KIND_LABEL: Record<string, string> = { uses: 'type', extends: 'extends', implements: 'implements' };
+
+/**
+ * Exact places that use a symbol or file (query core), grouped by file, each opening the code or the
+ * editor. `cycle`: importing files whose import is part of a dependency cycle.
+ */
+function UseSiteList({ uses, targetId, empty, cycle }: { uses: UsesResult; targetId?: string; empty: string; cycle?: Set<string> }) {
+  const model = useModel();
+  const groups = new Map<string, UseSite[]>();
+  // Type and inheritance references have no call site: shown at the referencing symbol's line.
+  const refSites: UseSite[] = uses.refs.map((r) => ({ file: r.file, line: symbolRef(model.data, r.symbol)?.line ?? 1, kind: 'call', symbol: r.symbol, target: r.target, names: [REF_KIND_LABEL[r.kind] ?? r.kind] }));
+  const isRef = new Set(refSites);
+  for (const site of [...uses.imports, ...uses.sites, ...uses.http, ...refSites].sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line)) {
+    const list = groups.get(site.file);
+    if (list) list.push(site);
+    else groups.set(site.file, [site]);
+  }
+  if (!groups.size) return <div className="muted small">{empty}</div>;
+  return (
+    <div className="stack" style={{ gap: 8 }}>
+      {[...groups.entries()].map(([file, sites]) => {
+        const f = model.fileById.get(file);
+        return (
+          <div key={file}>
+            <button className="list-item" onClick={() => selectFile(file)} title={file}>
+              {f && <KindDot kind={f.kind} />}
+              <div className="title truncate mono" style={{ fontSize: 12, flex: 1, minWidth: 0 }}>
+                {file}
+              </div>
+              {cycle?.has(file) && <span className="badge danger">cycle</span>}
+              {f?.scope === 'context' && <span className="badge outline">outside scope</span>}
+            </button>
+            {sites.map((site, i) => {
+              const ref = isRef.has(site);
+              const what = ref
+                ? `${site.symbol ? symbolLabel(site.symbol) : ''}${site.target && site.target !== targetId ? ` → ${symbolLabel(site.target)}` : ''}`
+                : site.kind === 'import' || site.kind === 'reexport'
+                  ? `${importedNames(site.names)}${site.via ? ` via ${basename(site.via)}` : ''}`
+                  : site.kind === 'http'
+                    ? `${site.method ?? ''} ${site.url ?? ''}`
+                    : `${site.symbol ? symbolLabel(site.symbol) : 'module code'}${site.target && site.target !== targetId ? ` → ${symbolLabel(site.target)}` : ''}${site.argc !== undefined && site.kind !== 'render' ? (site.argc < 0 ? ' (…spread)' : ` (${plural(site.argc, 'arg')})`) : ''}`;
+              return (
+                <div key={`${site.kind}:${site.line}:${site.symbol ?? ''}:${site.target ?? ''}:${site.argc ?? ''}:${i}`} className="sym-row" style={{ paddingLeft: 26 }} onClick={() => selectFile(site.file, site.line)} title={`${site.file}:${site.line}`}>
+                  <span className={`badge${site.kind === 'http' ? ' info' : site.typeOnly || ref ? '' : ' outline'}`}>{ref ? site.names?.[0] : USE_KIND_LABEL[site.kind]}</span>
+                  <span className="name">{what}</span>
+                  {site.typeOnly && <span className="badge">type</span>}
+                  <span className="line">:{site.line}</span>
+                  <EditorLink file={site.file} line={site.line} />
+                </div>
+              );
+            })}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/** Pin, note and "add to my tour" for anything shown in the panel. */
+function PersonalBar({ sel, stepTitle }: { sel: Selection; stepTitle: string }) {
+  const key = selectionKey(sel);
+  const pinned = usePersonal((s) => s.pins.includes(key));
+  const note = usePersonal((s) => s.notes[key]);
+  const inTour = usePersonal((s) => s.tour.steps.some((st) => st.key === key));
+  const [editing, setEditing] = useState(false);
+  const [text, setText] = useState(note?.text ?? '');
+  useEffect(() => setText(note?.text ?? ''), [note?.text, key]);
+  const showEditor = editing || !!note;
+  return (
+    <>
+      <div className="row" style={{ gap: 6 }}>
+        <button className={`btn sm${pinned ? ' active' : ''}`} onClick={() => togglePin(key)} title={pinned ? 'Unpin' : 'Pin to Today'}>
+          {pinned ? <PinOff size={13} /> : <Pin size={13} />} {pinned ? 'Pinned' : 'Pin'}
+        </button>
+        <button className={`btn sm${showEditor ? ' active' : ''}`} onClick={() => setEditing(!editing)} title="Write a note for your future self (or your team)">
+          <StickyNote size={13} /> Note
+        </button>
+        <button
+          className={`btn sm${inTour ? ' active' : ''}`}
+          onClick={() => {
+            addTourStep({ key, title: stepTitle, description: note?.text ?? '' });
+            toast(inTour ? 'Tour step updated' : `Added “${stepTitle}” to your tour`);
+          }}
+          title="Add to your own tour (Guided tour → My tour)"
+        >
+          <ListPlus size={13} /> {inTour ? 'In tour' : 'Add to tour'}
+        </button>
+      </div>
+      {showEditor && (
+        <div>
+          <textarea
+            className="note-box"
+            value={text}
+            placeholder="What did you learn here? Why does it work like this? (saved automatically)"
+            onChange={(e) => {
+              setText(e.target.value);
+              setNote(key, e.target.value);
+            }}
+            autoFocus={editing && !note}
+          />
+          <div className="tiny faint">{liveConfig() ? 'Saved to .code-visualizer/notes.json in the project' : 'Saved in this browser'}{note ? ` · ${new Date(note.updatedAt).toLocaleString()}` : ''}</div>
+        </div>
+      )}
+    </>
+  );
+}
+
+function CopyContextButton({ fileId }: { fileId: string }) {
+  const model = useModel();
+  return (
+    <button
+      className="btn sm"
+      title="Copy Markdown context about this file (summary, API, dependencies, tests, history, source) to paste into ChatGPT / Claude / Copilot"
+      onClick={async () => {
+        if (await copyText(fileContextMarkdown(model.data, fileId, { source: true }))) toast('Context for AI copied to the clipboard');
+      }}
+    >
+      <Bot size={13} /> Copy for AI
+    </button>
+  );
+}
+
 /* ---------------------------------------------------------------------------- */
 /*                                     File                                     */
 /* ---------------------------------------------------------------------------- */
 
-type FileTab = 'outline' | 'imports' | 'usedby' | 'exports' | 'code' | 'todos';
+type FileTab = 'outline' | 'imports' | 'usedby' | 'exports' | 'code' | 'diff' | 'history' | 'tests' | 'todos' | 'similar';
 
 function FilePanel({ id, line }: { id: string; line?: number }) {
   const model = useModel();
@@ -138,10 +327,12 @@ function FilePanel({ id, line }: { id: string; line?: number }) {
   const [tab, setTab] = useState<FileTab>((detailTab as FileTab) || (line ? 'code' : 'outline'));
   const impact = useMemo(() => {
     if (!file) return undefined;
-    const dependents = transitive(model, file.id, 'dependents');
-    const deps = transitive(model, file.id, 'deps');
+    const dependents = transitive(model.data, file.id, 'dependents');
+    const deps = transitive(model.data, file.id, 'deps');
     return { dependents: dependents.size, deps: deps.size };
   }, [model, file]);
+  // Exact use sites (imports, calls into its symbols, HTTP requests to its routes) from the query core.
+  const uses = useMemo(() => (file ? usesOf(model.data, { type: 'file', id: file.id }) : undefined), [model, file]);
   if (!file) {
     return (
       <>
@@ -162,11 +353,23 @@ function FilePanel({ id, line }: { id: string; line?: number }) {
   const tabs: { value: FileTab; label: string; count?: number }[] = [
     { value: 'outline', label: 'Outline', count: file.symbols.length },
     { value: 'imports', label: 'Imports', count: imports.length + packages.length },
-    { value: 'usedby', label: 'Used by', count: usedBy.length },
+    { value: 'usedby', label: 'Used by', count: uses?.files ?? usedBy.length },
     { value: 'exports', label: 'Exports', count: file.exports.length },
   ];
+  const change = model.changed.get(file.id);
   if (file.source !== undefined) tabs.push({ value: 'code', label: 'Code' });
+  if (change?.diff) tabs.push({ value: 'diff', label: 'Diff' });
+  if (file.git) tabs.push({ value: 'history', label: 'History', count: file.git.commits });
+  if (file.tests?.length) tabs.push({ value: 'tests', label: 'Tests', count: file.tests.length });
   if (file.todos.length) tabs.push({ value: 'todos', label: 'TODOs', count: file.todos.length });
+  // --- clone-radar: copy-paste clones of this file, next to its exports (a narrow panel would scroll it out of sight) ---
+  const similar = familiesOf(model.data.insights.clones, file.id).length;
+  if (similar) tabs.splice(tabs.findIndex((t) => t.value === 'exports') + 1, 0, { value: 'similar', label: 'Similar code', count: similar });
+  // The rule tests-for, impact, My changes and the live guard use (query.testEvidence).
+  const reachedBy = testEvidence(model.data, file);
+  const routeTests = reachedBy === 'route' ? (routeTestReach(model.data).get(file.id) ?? []) : [];
+  const folder = model.folderByPath.get(file.dir)?.summary;
+  const apiCalls = model.apiByFile.get(file.id) ?? [];
 
   return (
     <>
@@ -188,6 +391,12 @@ function FilePanel({ id, line }: { id: string; line?: number }) {
             {file.inCycle && <span className="badge danger">In a dependency cycle</span>}
             {file.orphan && <span className="badge warn">Not imported anywhere</span>}
             {file.isGenerated && <span className="badge">Generated</span>}
+            {change && (
+              <span className="badge warn" title="Changed in your current work">
+                <GitPullRequestArrow size={11} /> {change.status} <PlusMinus add={change.additions} del={change.deletions} />
+              </span>
+            )}
+            {model.impacted.has(file.id) && <span className="badge info">affected by your changes</span>}
             {file.directives?.map((d) => (
               <span key={d} className="badge outline">
                 '{d}'
@@ -204,10 +413,14 @@ function FilePanel({ id, line }: { id: string; line?: number }) {
               <Radar size={13} /> Impact
             </button>
             <EditorButton file={file.id} line={line} />
+            <CopyContextButton fileId={file.id} />
           </>
         }
       />
       <div className="panel-body">
+        <div className="panel-section stack" style={{ gap: 10 }}>
+          <PersonalBar sel={{ type: 'file', id: file.id }} stepTitle={file.name} />
+        </div>
         {file.description && (
           <div className="panel-section">
             <div className="prose small">{file.description}</div>
@@ -222,6 +435,55 @@ function FilePanel({ id, line }: { id: string; line?: number }) {
             <Metric value={fmtNum(file.metrics.fanIn)} label="Used by" />
             <Metric value={pct(file.metrics.importance, 1)} label="Importance" title="PageRank-style centrality (100% = the most depended-upon file)" />
           </div>
+          {(file.owners?.length || folder?.experts?.length || file.tests !== undefined || reachedBy) && (
+            <dl className="kv" style={{ marginTop: 12 }}>
+              {file.owners?.length ? (
+                <>
+                  <dt>Code owners</dt>
+                  <dd>{file.owners.join(', ')}</dd>
+                </>
+              ) : null}
+              {(file.git?.authors.length || folder?.experts?.length) && (
+                <>
+                  <dt>Who to ask</dt>
+                  <dd>
+                    <div className="row" style={{ gap: 6 }}>
+                      {(file.git?.authors.length ? file.git.authors.slice(0, 3).map((a) => a.name) : folder!.experts!.map((e) => e.name)).map((name) => (
+                        <span key={name} className="row nowrap tiny" style={{ gap: 4 }}>
+                          <Avatar name={name} size="sm" /> {name}
+                        </span>
+                      ))}
+                    </div>
+                  </dd>
+                </>
+              )}
+              <dt>Tests</dt>
+              <dd>
+                {file.kind === 'test' ? (
+                  'this is a test file'
+                ) : file.tests?.length ? (
+                  <a onClick={() => setTab('tests')}>
+                    {plural(file.tests.length, 'test file')} {file.tests.length === 1 ? 'reaches' : 'reach'} this file
+                  </a>
+                ) : reachedBy === 'route' ? (
+                  <span title={routeTests.join('\n')}>
+                    {plural(routeTests.length, 'test')} {routeTests.length === 1 ? 'reaches it through a route it requests' : 'reach it through routes they request'}
+                  </span>
+                ) : reachedBy === 'coverage' ? (
+                  <span title="The coverage report saw its lines run: tests load it in a way imports do not show">no test imports this file</span>
+                ) : (
+                  <span style={{ color: 'var(--warning)' }}>no test reaches this file</span>
+                )}
+                {/* --- test-intelligence: line coverage from the local coverage report --- */}
+                {file.coverage && file.coverage.lines.total > 0 && (
+                  <span className="faint" title={`${file.coverage.lines.covered} of ${file.coverage.lines.total} lines executed by tests (${file.coverage.source} report)${file.coverage.stale ? ' — the file changed since the report was written' : ''}`}>
+                    {' '}
+                    · {Math.round((file.coverage.lines.covered / file.coverage.lines.total) * 100)}% line coverage{file.coverage.stale ? ' (outdated)' : ''}
+                  </span>
+                )}
+              </dd>
+            </dl>
+          )}
           {impact && (
             <div className="row small muted" style={{ marginTop: 12, gap: 14 }}>
               <span className="row nowrap" style={{ gap: 4 }} title="Files that import this file directly or indirectly">
@@ -233,26 +495,21 @@ function FilePanel({ id, line }: { id: string; line?: number }) {
             </div>
           )}
         </div>
-        {file.git && (
-          <Section title="History">
-            <dl className="kv">
-              <dt>Commits</dt>
-              <dd>{fmtNum(file.git.commits)}</dd>
-              <dt>Last changed</dt>
-              <dd>{timeAgo(file.git.lastModified)}</dd>
-              <dt>Created</dt>
-              <dd>{timeAgo(file.git.firstSeen)}</dd>
-              <dt>Main authors</dt>
-              <dd>
-                {file.git.authors.slice(0, 3).map((a) => (
-                  <div key={a.name} className="row nowrap" style={{ gap: 6 }}>
-                    <GitCommitHorizontal size={12} className="faint" />
-                    <span className="truncate">{a.name}</span>
-                    <span className="faint tiny">{a.commits}</span>
-                  </div>
-                ))}
-              </dd>
-            </dl>
+        {apiCalls.length > 0 && (
+          <Section title="HTTP calls" count={apiCalls.length}>
+            {apiCalls.slice(0, 12).map((c) => {
+              const r = c.route ? model.routeById.get(c.route) : undefined;
+              return (
+                <div key={c.id} className="sym-row" onClick={() => (r ? select({ type: 'route', id: r.id }) : selectFile(file.id, c.line))}>
+                  <span className="method" style={{ ['--m' as string]: METHOD_COLORS[c.method] }}>
+                    {c.method}
+                  </span>
+                  <span className="name">{c.url}</span>
+                  <span className="faint tiny truncate">{r ? `→ ${basename(r.file)}` : c.external ? c.external : 'no matching route'}</span>
+                  <span className="line">:{c.line}</span>
+                </div>
+              );
+            })}
           </Section>
         )}
         {cycles.length > 0 && (
@@ -311,8 +568,15 @@ function FilePanel({ id, line }: { id: string; line?: number }) {
         )}
         {tab === 'usedby' && (
           <div className="panel-section">
-            {!usedBy.length && <div className="muted small">No file in this report imports this file{file.isEntry ? ' — it is an entry point.' : '.'}</div>}
-            <EdgeList edges={usedBy.map((e) => ({ file: e.source, names: e.names, typeOnly: e.typeOnly, kind: e.kind, line: e.line, inCycle: e.inCycle }))} />
+            {uses ? (
+              <UseSiteList
+                uses={uses}
+                cycle={new Set(usedBy.filter((e) => e.inCycle).map((e) => e.source))}
+                empty={`No file in this report imports this file${file.isEntry ? ' — it is an entry point.' : '.'}`}
+              />
+            ) : (
+              <EdgeList edges={usedBy.map((e) => ({ file: e.source, names: e.names, typeOnly: e.typeOnly, kind: e.kind, line: e.line, inCycle: e.inCycle }))} />
+            )}
           </div>
         )}
         {tab === 'exports' && (
@@ -335,8 +599,67 @@ function FilePanel({ id, line }: { id: string; line?: number }) {
           </div>
         )}
         {tab === 'code' && file.source !== undefined && (
-          <div style={{ borderTop: 0 }}>
-            <CodeView source={file.source} from={line} maxHeight="calc(100vh - 220px)" />
+          <CodeTab file={file} line={line} changedLines={change ? new Set(change.lines) : undefined} uncoveredLines={uncoveredChangedLines(model, file.id)} />
+        )}
+        {tab === 'diff' && change?.diff && <DiffView diff={change.diff} maxHeight="calc(100vh - 220px)" />}
+        {tab === 'history' && file.git && (
+          <div className="panel-section">
+            <dl className="kv" style={{ marginBottom: 12 }}>
+              <dt>Commits</dt>
+              <dd>{fmtNum(file.git.commits)}</dd>
+              <dt>Last changed</dt>
+              <dd>{timeAgo(file.git.lastModified)}</dd>
+              <dt>Created</dt>
+              <dd>{timeAgo(file.git.firstSeen)}</dd>
+              <dt>Ownership</dt>
+              <dd>
+                {Math.round(file.git.ownership * 100)}% by {file.git.authors[0]?.name}
+              </dd>
+            </dl>
+            <h4>Authors</h4>
+            {file.git.authors.map((a) => (
+              <div key={a.name} className="row nowrap small" style={{ gap: 8, padding: '3px 0' }}>
+                <Avatar name={a.name} size="sm" />
+                <span className="truncate" style={{ flex: 1 }}>
+                  {a.name}
+                </span>
+                <span className="tiny faint">
+                  {plural(a.commits, 'commit')} · {timeAgo(a.last)}
+                </span>
+              </div>
+            ))}
+            <h4 style={{ marginTop: 14 }}>Recent commits — why it looks like this</h4>
+            {file.git.recent.map((c) => (
+              <div key={c.hash} className="commit-row" style={{ padding: '6px 4px', cursor: 'default' }}>
+                <Avatar name={c.author} size="sm" />
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div className="small">{c.subject}</div>
+                  <div className="tiny faint">
+                    {c.author} · {timeAgo(c.date)} · <span className="mono">{c.hash.slice(0, 7)}</span>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+        {tab === 'tests' && file.tests && (
+          <div className="panel-section">
+            <div className="small muted" style={{ marginBottom: 8 }}>
+              These test files import this file directly or indirectly — run them after changing it.
+            </div>
+            <div className="list">
+              {file.tests.map((t) => (
+                <button key={t} className="list-item" onClick={() => selectFile(t)}>
+                  <KindDot kind="test" />
+                  <span className="mono small truncate">{t}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+        {tab === 'similar' && (
+          <div className="panel-section">
+            <SimilarCode fileId={file.id} />
           </div>
         )}
         {tab === 'todos' && (
@@ -354,6 +677,51 @@ function FilePanel({ id, line }: { id: string; line?: number }) {
         )}
       </div>
     </>
+  );
+}
+
+/** test-intelligence: the changed lines of a file that no test executed (patch coverage ranges). */
+function uncoveredChangedLines(model: Model, fileId: string): Set<number> | undefined {
+  const entry = model.data.changes?.coverage?.files.find((f) => f.file === fileId);
+  if (!entry?.uncovered.length) return undefined;
+  const lines = new Set<number>();
+  for (const [a, b] of entry.uncovered) for (let l = a; l <= b; l++) lines.add(l);
+  return lines;
+}
+
+function CodeTab({ file, line, changedLines, uncoveredLines }: { file: FileInfo; line?: number; changedLines?: Set<number>; uncoveredLines?: Set<number> }) {
+  const [blame, setBlame] = useState<BlameRange[] | undefined>();
+  const [loading, setLoading] = useState(false);
+  const live = !!liveConfig();
+  return (
+    <div>
+      {(live || changedLines) && (
+        <div className="row small" style={{ padding: '8px 18px', gap: 10, borderBottom: '1px solid var(--border)' }}>
+          {live && (
+            <button
+              className={`btn sm${blame ? ' active' : ''}`}
+              disabled={loading}
+              onClick={async () => {
+                if (blame) return setBlame(undefined);
+                setLoading(true);
+                const result = await fetchBlame(file.id).catch(() => undefined);
+                setLoading(false);
+                if (result) setBlame(result);
+                else toast('No git blame for this file');
+              }}
+            >
+              <Users size={13} /> {loading ? 'Loading…' : blame ? 'Hide blame' : 'Blame'}
+            </button>
+          )}
+          {changedLines && (
+            <span className="tiny muted">
+              Lines you changed are marked in the gutter{uncoveredLines ? <>; <span style={{ color: 'var(--danger)' }}>red</span>: no test runs them</> : ''}.
+            </span>
+          )}
+        </div>
+      )}
+      <CodeView source={file.source!} from={line} maxHeight="calc(100vh - 260px)" blame={blame} changedLines={changedLines} uncoveredLines={uncoveredLines} />
+    </div>
   );
 }
 
@@ -440,7 +808,7 @@ function Outline({ model, file, routes }: { model: Model; file: FileInfo; routes
                 <span className="name">{s.name}</span>
                 {s.exported && <span className="badge" title="Exported">{s.isDefault ? 'default' : 'export'}</span>}
                 {(s.complexity ?? 0) >= 15 && (
-                  <span className="badge warn" title="Cyclomatic complexity">
+                  <span className="badge warn" title={`Cyclomatic complexity${s.cognitive ? ` · cognitive ${s.cognitive}` : ''}`}>
                     cx {s.complexity}
                   </span>
                 )}
@@ -530,6 +898,8 @@ function SymbolPanel({ id }: { id: string }) {
   // Calls into a class arrive at its methods (`Class.method`); show them on the class too.
   const memberCallers = !member && symbol.kind === 'class' ? (symbol.members ?? []).flatMap((m) => model.symIn.get(`${symbol.id}.${m.name}`) ?? []).filter((e) => fileOfSymbolId(e.source) !== file.id || !e.source.startsWith(`${symbol.id}.`)) : [];
   const callers = [...by(inn, 'calls'), ...memberCallers.filter((e) => e.kind === 'calls')];
+  const uses = usesOf(model.data, { type: 'symbol', id });
+  const siteCount = uses.imports.length + uses.sites.length + uses.http.length + uses.refs.length;
 
   return (
     <>
@@ -556,6 +926,12 @@ function SymbolPanel({ id }: { id: string }) {
             {member?.static && <span className="badge">static</span>}
             {member?.visibility && <span className="badge">{member.visibility}</span>}
             {!member && symbol.tags?.map((t) => <span key={t} className="badge info">{t}</span>)}
+            {!member && symbol.deprecated !== undefined && (
+              <span className="badge danger" title={symbol.deprecated || 'Deprecated'}>
+                deprecated
+              </span>
+            )}
+            {model.data.changes?.symbols.some((cs) => cs.id === id) && <span className="badge warn">changed in your work</span>}
             {(member?.decorators ?? (!member ? symbol.decorators : undefined))?.map((d) => (
               <span key={d} className="badge outline">
                 @{d}
@@ -578,6 +954,10 @@ function SymbolPanel({ id }: { id: string }) {
         }
       />
       <div className="panel-body">
+        <div className="panel-section stack" style={{ gap: 10 }}>
+          <PersonalBar sel={{ type: 'symbol', id }} stepTitle={ref.label} />
+          {!member && symbol.deprecated ? <div className="small" style={{ color: 'var(--danger)' }}>Deprecated: {symbol.deprecated}</div> : null}
+        </div>
         {(symbol.doc && !member) && (
           <div className="panel-section">
             <div className="prose small">{symbol.doc}</div>
@@ -591,10 +971,20 @@ function SymbolPanel({ id }: { id: string }) {
           </div>
         )}
         <div className="panel-section">
-          <div className="metrics">
+          <div className="metrics cols-4">
             <Metric value={member ? '–' : fmtNum(symbol.loc)} label="Lines" />
-            <Metric value={member ? '–' : (symbol.complexity ?? '–')} label="Complexity" />
-            <Metric value={fmtNum(new Set([...inn, ...memberCallers].map((e) => e.source)).size)} label="Used by" />
+            <Metric
+              value={member ? '–' : (symbol.complexity ?? '–')}
+              label="Complexity"
+              title="Cyclomatic complexity: independent paths through this code (nested functions are counted on their own)"
+            />
+            {/* accuracy-pass: cognitive complexity next to the cyclomatic one */}
+            <Metric
+              value={member ? '–' : (symbol.cognitive ?? '–')}
+              label="Cognitive"
+              title="Cognitive complexity: how hard the code is to follow — branches count more the deeper they are nested"
+            />
+            <Metric value={fmtNum(uses.files)} label="Used by" title="Files that import, call, render, instantiate or reference it (the Used by list below)" />
           </div>
         </div>
         {comp && (
@@ -725,6 +1115,9 @@ function SymbolPanel({ id }: { id: string }) {
             )}
           </Section>
         )}
+        <Section title="Used by" count={uses.files} right={siteCount ? <span className="tiny faint">{plural(siteCount, 'place')}</span> : undefined}>
+          <UseSiteList uses={uses} targetId={id} empty={symbol.exported ? 'No analyzed file imports or calls it.' : 'Not used outside its own code.'} />
+        </Section>
         {(by(out, 'calls').length > 0 || callers.length > 0 || memberEdges.length > 0) && (
           <Section title="Calls" count={by(out, 'calls').length + memberEdges.filter((e) => e.kind === 'calls').length}>
             <SymbolLinks edges={[...by(out, 'calls'), ...memberEdges.filter((e) => e.kind === 'calls')]} side="target" empty="Calls no project functions." />
@@ -739,12 +1132,19 @@ function SymbolPanel({ id }: { id: string }) {
             <SymbolLinks edges={[...by(out, 'uses'), ...by(out, 'instantiates')]} side="target" />
             {(by(inn, 'uses').length > 0 || by(inn, 'instantiates').length > 0) && (
               <>
-                <h4 style={{ marginTop: 12 }}>Used by</h4>
+                <h4 style={{ marginTop: 12 }}>Referenced by</h4>
                 <SymbolLinks edges={[...by(inn, 'uses'), ...by(inn, 'instantiates')]} side="source" />
               </>
             )}
           </Section>
         )}
+        {/* --- clone-radar: copies of this declaration elsewhere --- */}
+        {familiesOf(model.data.insights.clones, file.id, { start: line, end: endLine }).length > 0 && (
+          <Section title="Similar code" count={familiesOf(model.data.insights.clones, file.id, { start: line, end: endLine }).length}>
+            <SimilarCode fileId={file.id} range={{ start: line, end: endLine }} />
+          </Section>
+        )}
+        {/* --- /clone-radar --- */}
         {snippet !== undefined && (
           <Section title="Source">
             <div style={{ margin: '0 -18px -14px', borderTop: '1px solid var(--border)' }}>
@@ -815,6 +1215,29 @@ function FolderPanel({ path }: { path: string }) {
             <Metric value={fmtNum(folder.folders.length)} label="Subfolders" />
           </div>
         </div>
+        <div className="panel-section stack" style={{ gap: 10 }}>
+          <PersonalBar sel={{ type: 'folder', id: path }} stepTitle={`${folder.name || model.data.project.rootName}/`} />
+        </div>
+        {(folder.summary?.experts?.length || folder.summary?.owners?.length) && (
+          <Section title="Who to ask">
+            {folder.summary?.experts?.map((e) => (
+              <div key={e.name} className="row nowrap small" style={{ gap: 8, padding: '3px 0' }}>
+                <Avatar name={e.name} size="sm" />
+                <span className="truncate" style={{ flex: 1 }}>
+                  {e.name}
+                </span>
+                <span className="tiny faint">{Math.round(e.share * 100)}% of recent changes</span>
+              </div>
+            ))}
+            {folder.summary?.busFactor !== undefined && (
+              <div className="tiny" style={{ marginTop: 6, color: folder.summary.busFactor === 1 ? 'var(--danger)' : 'var(--text-dim)' }}>
+                Bus factor {folder.summary.busFactor}
+                {folder.summary.busFactor === 1 ? ' — one person holds most of the knowledge here' : ''}
+              </div>
+            )}
+            {folder.summary?.owners?.length ? <div className="tiny faint" style={{ marginTop: 4 }}>Code owners: {folder.summary.owners.join(', ')}</div> : null}
+          </Section>
+        )}
         <Section title="What's inside">
           <BarList
             items={[...kinds.entries()]
@@ -975,6 +1398,29 @@ function RoutePanel({ id }: { id: string }) {
         }
       />
       <div className="panel-body">
+        <div className="panel-section stack" style={{ gap: 10 }}>
+          <PersonalBar sel={{ type: 'route', id }} stepTitle={`${route.method} ${route.path}`} />
+        </div>
+        {(model.apiByRoute.get(route.id)?.length ?? 0) > 0 && (
+          <Section title="Called from" count={model.apiByRoute.get(route.id)!.length}>
+            {model.apiByRoute.get(route.id)!.slice(0, 20).map((c) => {
+              const f = model.fileById.get(c.file);
+              const sym = c.symbol ? model.resolveSymbol(c.symbol) : undefined;
+              return (
+                <div key={c.id} className="sym-row" onClick={() => (c.symbol ? selectSymbol(c.symbol) : selectFile(c.file, c.line))}>
+                  {f && <KindDot kind={f.kind} />}
+                  <span className="name">{sym?.label ?? basename(c.file)}</span>
+                  <span className="faint tiny truncate">
+                    {c.client} {c.url}
+                  </span>
+                  <span className="line">
+                    {basename(c.file)}:{c.line}
+                  </span>
+                </div>
+              );
+            })}
+          </Section>
+        )}
         <Section title="Request flow">
           <div className="stack" style={{ gap: 8 }}>
             <FlowStep label="Request" detail={`${route.method} ${route.path}`} color={color} />

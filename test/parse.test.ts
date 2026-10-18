@@ -963,3 +963,79 @@ describe('parseSource: TODOs, directives, docs', () => {
     expect(parsed.loc).toBe(1);
   });
 });
+
+describe('parseSource: call sites (query-core)', () => {
+  it('records the line and argument count of calls, `new` and JSX renders', () => {
+    const parsed = parse(
+      code`
+        import { format, Widget } from './lib';
+
+        export function Panel({ items }: { items: string[] }) {
+          const a = format(items[0], 2);
+          const b = format(...items);
+          const w = new Widget();
+          return (
+            <section>
+              <Widget title={format(a)} />
+              {b}
+            </section>
+          );
+        }
+      `,
+      'src/Panel.tsx',
+    );
+    const sites = parsed.facts.get('Panel')!.sites!;
+    expect(sites.get('format')).toEqual([
+      [4, 2],
+      [5, -1],
+      [9, 1],
+    ]);
+    expect(sites.get('new:Widget')).toEqual([[6, 0]]);
+    expect(sites.get('jsx:Widget')).toEqual([[9, 0]]);
+  });
+
+  it('keeps at most 20 sites per callee and records class methods under their own key', () => {
+    const calls = Array.from({ length: 25 }, (_, i) => `  log(${i});`).join('\n');
+    const parsed = parse(`export function noisy() {\n${calls}\n}\nexport class Svc {\n  run() {\n    return this.step(1);\n  }\n  step(n: number) { return n; }\n}\n`, 'src/noisy.ts');
+    const log = parsed.facts.get('noisy')!.sites!.get('log')!;
+    expect(log).toHaveLength(20);
+    expect(log[0]).toEqual([2, 1]);
+    expect(parsed.facts.get('noisy')!.calls.get('log')).toBe(25);
+    expect(parsed.facts.get('Svc.run')!.sites!.get('this.step')).toEqual([[30, 1]]);
+  });
+
+  it('maps call sites in Vue, Svelte and Astro scripts to lines of the whole file', () => {
+    const vue = parse(
+      code`
+        <template>
+          <p>{{ msg }}</p>
+        </template>
+
+        <script setup lang="ts">
+        import { ref } from 'vue';
+        import { greet } from './greet';
+        const msg = ref(greet('you'));
+        function shout() { return greet('YOU', true); }
+        </script>
+      `,
+      'src/components/Hello.vue',
+    );
+    expect(vue.facts.get('shout')!.sites!.get('greet')).toEqual([[9, 2]]);
+    // Script-level code belongs to the component itself.
+    expect(vue.facts.get('Hello')!.sites!.get('greet')).toEqual(expect.arrayContaining([[8, 1]]));
+    // Components rendered in the template, PascalCase or kebab-case.
+    const list = parse(`<template>\n  <ul>\n    <todo-item v-for="t in items" />\n  </ul>\n  <Footer />\n</template>\n<script setup>\nimport TodoItem from './TodoItem.vue';\nimport Footer from './Footer.vue';\n</script>\n`, 'src/List.vue');
+    expect(list.facts.get('List')!.sites!.get('jsx:TodoItem')).toEqual([[3, 0]]);
+    expect(list.facts.get('List')!.sites!.get('jsx:Footer')).toEqual([[5, 0]]);
+    const markup = parse(`<script>\n  import Card from './Card.svelte';\n</script>\n\n<Card />\n`, 'src/Page.svelte');
+    expect(markup.facts.get('Page')!.sites!.get('jsx:Card')).toEqual([[5, 0]]);
+    const svelte = parse(`<h1>hi</h1>\n<script>\n  import { track } from './t';\n  track('x');\n</script>\n`, 'src/Hi.svelte');
+    expect(svelte.facts.get('Hi')!.sites!.get('track')).toEqual([[4, 1]]);
+    const astro = parse(`---\nimport { load } from './data';\nconst data = await load(1, 2);\n---\n<p>{data}</p>\n<script>\n  function boot() { start(); }\n</script>\n`, 'src/pages/index.astro');
+    expect(sym(astro, 'data').line).toBe(3);
+    expect(astro.facts.get('Pages')!.sites!.get('load')).toEqual([[3, 2]]);
+    // Client scripts after the frontmatter keep their position in the file.
+    expect(sym(astro, 'boot').line).toBe(7);
+    expect(astro.facts.get('boot')!.sites!.get('start')).toEqual([[7, 0]]);
+  });
+});

@@ -6,7 +6,7 @@ import { select, useStore } from '../state/store';
 import type { PackageInfo } from '../types';
 import { BarList, SearchInput, Segmented, Stat } from '../components/ui';
 
-type Filter = 'all' | 'external' | 'builtin' | 'unused' | 'missing' | 'dev';
+type Filter = 'all' | 'external' | 'builtin' | 'unused' | 'missing' | 'dev' | 'production';
 type Sort = 'files' | 'name' | 'imports';
 
 export function PackagesView() {
@@ -18,8 +18,12 @@ export function PackagesView() {
   const [sort, setSort] = useState<Sort>('files');
   const external = pkgs.filter((p) => !p.builtin && p.importedBy.length);
   const builtins = pkgs.filter((p) => p.builtin);
-  const unused = pkgs.filter((p) => p.unused);
+  // accuracy-pass: a package one package.json declares without using (while other code imports it) counts too
+  const unused = pkgs.filter((p) => p.unused || p.unusedIn?.length);
   const missing = pkgs.filter((p) => p.missing);
+  // accuracy-pass: devDependencies that production code imports
+  const devInProduction = useMemo(() => new Map((model.data.insights.devDependenciesInProduction ?? []).map((d) => [d.name, d])), [model]);
+  const manifestLabel = (dir: string): string => (dir ? `${dir}/package.json` : 'package.json');
   const list = useMemo(() => {
     const q = search.trim().toLowerCase();
     const match = (p: PackageInfo): boolean => {
@@ -30,11 +34,13 @@ export function PackagesView() {
         case 'builtin':
           return p.builtin;
         case 'unused':
-          return !!p.unused;
+          return !!p.unused || !!p.unusedIn?.length;
         case 'missing':
           return !!p.missing;
         case 'dev':
           return p.declaredAs === 'devDependencies' && p.importedBy.length > 0;
+        case 'production':
+          return devInProduction.has(p.name);
         default:
           return true;
       }
@@ -42,7 +48,7 @@ export function PackagesView() {
     return pkgs
       .filter(match)
       .sort((a, b) => (sort === 'name' ? a.name.localeCompare(b.name) : sort === 'imports' ? b.importCount - a.importCount : b.importedBy.length - a.importedBy.length || a.name.localeCompare(b.name)));
-  }, [pkgs, filter, search, sort]);
+  }, [pkgs, filter, search, sort, devInProduction]);
   const top = external.slice(0, 14);
   const totalFiles = model.files.filter((f) => f.scope !== 'context').length;
 
@@ -91,6 +97,7 @@ export function PackagesView() {
               { value: 'builtin', label: `Built-in (${builtins.length})` },
               { value: 'unused', label: `Unused (${unused.length})` },
               { value: 'missing', label: `Missing (${missing.length})` },
+              ...(devInProduction.size ? [{ value: 'production' as const, label: `Dev deps in production (${devInProduction.size})` }] : []),
               { value: 'all', label: 'All' },
             ]}
           />
@@ -128,7 +135,19 @@ export function PackagesView() {
                     </span>
                   </td>
                   <td className="mono small muted">{p.version ?? (p.builtin ? 'built-in' : '—')}</td>
-                  <td className="small">{p.declaredAs ?? (p.builtin ? '' : <span style={{ color: 'var(--danger)' }}>not declared</span>)}</td>
+                  <td className="small">
+                    {p.declaredAs ?? (p.builtin ? '' : <span style={{ color: 'var(--danger)' }}>not declared</span>)}
+                    {devInProduction.has(p.name) && (
+                      <span className="badge warn" style={{ marginLeft: 6 }} title={`Imported by production code: ${devInProduction.get(p.name)!.files.join(', ')} — move it to "dependencies"`}>
+                        used in production
+                      </span>
+                    )}
+                    {!p.unused && !!p.unusedIn?.length && (
+                      <span className="badge warn" style={{ marginLeft: 6 }} title="Declared there as a dependency, but no code under that package.json imports it">
+                        unused in {p.unusedIn.map(manifestLabel).join(', ')}
+                      </span>
+                    )}
+                  </td>
                   <td className="num">{p.importedBy.length}</td>
                   <td className="num muted">{p.importCount}</td>
                   <td className="mono tiny muted truncate" style={{ maxWidth: 360 }}>

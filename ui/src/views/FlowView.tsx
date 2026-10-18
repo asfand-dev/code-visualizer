@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import type { ElementDefinition, LayoutOptions } from 'cytoscape';
 import { Workflow } from 'lucide-react';
 import { useModel } from '../data/context';
+import { callersOf, calleesOf } from '../../../src/shared/query';
 import { fileOfSymbolId, symbolLabel, type Model } from '../data/model';
 import { SYMBOL_META } from '../lib/colors';
 import { basename, plural } from '../lib/format';
@@ -38,8 +39,8 @@ function callables(model: Model): Callable[] {
       label: ref.label,
       file: ref.file.id,
       kind: kind as Callable['kind'],
-      out: (model.symOut.get(id) ?? []).filter((e) => e.kind === 'calls' || e.kind === 'instantiates').length,
-      in: (model.symIn.get(id) ?? []).filter((e) => e.kind === 'calls' || e.kind === 'instantiates').length,
+      out: calleesOf(model.data, id, ['calls', 'instantiates'], false).length,
+      in: callersOf(model.data, id, ['calls', 'instantiates'], false).length,
     });
   }
   return list.sort((a, b) => b.out + b.in - (a.out + a.in));
@@ -65,7 +66,7 @@ export function FlowView() {
   const elements = useMemo<ElementDefinition[]>(() => {
     if (!root) return [];
     const nodes = new Map<string, number>(); // id → column hint
-    const edges = new Map<string, { source: string; target: string; count: number }>();
+    const edges = new Map<string, { source: string; target: string; count: number; http?: string }>();
     const isCall = (k: string): boolean => k === 'calls' || k === 'instantiates';
     if (wholeFile) {
       const file = fileOfSymbolId(root);
@@ -86,15 +87,17 @@ export function FlowView() {
         while (queue.length) {
           const [id, d] = queue.shift()!;
           if (d >= depth) continue;
-          const list = dir === 'out' ? model.symOut.get(id) : model.symIn.get(id);
-          for (const e of list ?? []) {
-            if (!isCall(e.kind)) continue;
-            const next = dir === 'out' ? e.target : e.source;
-            edges.set(`${e.source}>${e.target}`, { source: e.source, target: e.target, count: e.count });
-            if (!nodes.has(next)) nodes.set(next, dir === 'out' ? d + 1 : -(d + 1));
-            if (!seen.has(next)) {
-              seen.add(next);
-              queue.push([next, d + 1]);
+          // Calls and `new`, plus HTTP requests to route handlers (full-stack flow).
+          const links = dir === 'out' ? calleesOf(model.data, id) : callersOf(model.data, id);
+          for (const l of links) {
+            const [source, target] = dir === 'out' ? [id, l.id] : [l.id, id];
+            const key = `${source}>${target}`;
+            if (l.kind === 'http') edges.set(key, { source, target, count: 1, http: l.label });
+            else if (!edges.get(key)?.http) edges.set(key, { source, target, count: l.count });
+            if (!nodes.has(l.id)) nodes.set(l.id, dir === 'out' ? d + 1 : -(d + 1));
+            if (!seen.has(l.id)) {
+              seen.add(l.id);
+              queue.push([l.id, d + 1]);
             }
           }
         }
@@ -112,7 +115,10 @@ export function FlowView() {
     }
     for (const [key, e] of edges) {
       if (!nodes.has(e.source) || !nodes.has(e.target)) continue;
-      els.push({ group: 'edges', data: { id: key, source: e.source, target: e.target, width: Math.min(4, 1 + Math.log2(e.count)), label: e.count > 1 ? `×${e.count}` : undefined } });
+      els.push({
+        group: 'edges',
+        data: { id: key, source: e.source, target: e.target, width: e.http ? 2 : Math.min(4, 1 + Math.log2(e.count)), label: e.http ? `HTTP ${e.http}` : e.count > 1 ? `×${e.count}` : undefined, dashed: !!e.http },
+      });
     }
     return els;
   }, [root, depth, direction, wholeFile, model]);
@@ -136,7 +142,7 @@ export function FlowView() {
     <div className="split" style={{ flex: 1, minHeight: 0 }}>
       <div className="split-side">
         <div className="side-head">
-          <SearchInput value={search} onChange={setSearch} placeholder={`Search ${list.length} functions…`} />
+          <SearchInput value={search} onChange={setSearch} placeholder={`Search ${plural(list.length, 'function')}…`} />
           <span className="tiny muted">Sorted by number of call connections</span>
         </div>
         <div className="side-body">
@@ -203,7 +209,7 @@ export function FlowView() {
           }}
         >
           <div className="floating legend">
-            <span className="tiny muted">Arrows point from caller to callee. Double-click a function to re-center.</span>
+            <span className="tiny muted">Arrows point from caller to callee; dashed arrows are HTTP requests to a route handler. Double-click a function to re-center.</span>
           </div>
         </CyCanvas>
       </div>

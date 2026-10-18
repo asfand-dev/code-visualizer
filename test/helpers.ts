@@ -10,7 +10,7 @@ import type {
   SymbolInfo,
 } from '../src/shared/types.js';
 
-export type FixtureName = 'react-vite-ts' | 'next-app' | 'express-api' | 'vue-app' | 'nest-api' | 'sveltekit-app';
+export type FixtureName = 'react-vite-ts' | 'next-app' | 'express-api' | 'vue-app' | 'nest-api' | 'sveltekit-app' | 'nested-subprojects' | 'monorepo-ws';
 
 export function fixturePath(name: FixtureName): string {
   return fileURLToPath(new URL(`./fixtures/${name}`, import.meta.url));

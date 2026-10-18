@@ -1,5 +1,9 @@
 import {
   Activity,
+  CalendarClock,
+  GitPullRequestArrow,
+  Home,
+  TextSearch,
   AlertTriangle,
   Atom,
   BookOpen,
@@ -44,6 +48,10 @@ import type { FileKind, SymbolKind } from '../types';
 import type { ViewId } from '../state/store';
 
 export const VIEW_ICONS: Record<ViewId, LucideIcon> = {
+  today: Home,
+  changes: GitPullRequestArrow,
+  search: TextSearch,
+  activity: CalendarClock,
   overview: LayoutDashboard,
   tour: BookOpen,
   graph: Network,

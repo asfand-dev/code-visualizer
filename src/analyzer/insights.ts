@@ -1,7 +1,10 @@
 import type {
+  DeclaredAs,
+  DevDependencyInProduction,
   FileInfo,
   FileKind,
   FolderSummary,
+  Insights,
   PackageInfo,
   ProjectInfo,
   ReportData,
@@ -490,25 +493,155 @@ export const IMPLICIT_PACKAGES = new Set([
   'eslint-config-next',
 ]);
 
-export function markPackageHealth(packages: PackageInfo[], declared: Map<string, { declaredAs: string }>, scriptsText: string): {
+/** One package.json as seen by `markPackageHealth` (deepest directory first in the list). */
+export interface ManifestDeclarations {
+  /** Project-relative directory ('' for the root). */
+  dir: string;
+  /** Package name (importing your own package by name is not a dependency). */
+  name?: string;
+  declared: Map<string, { version?: string; declaredAs: DeclaredAs }>;
+  /** Text of the scripts that can use its packages (packages used only from scripts are not unused). */
+  scripts: string;
+  /** Text of the tool configs that belong to it (`presets: ['@babel/preset-env']` uses the package). */
+  configText?: string;
+  /** Unused dependencies are only judged when all code that can use them was analyzed. */
+  checkUnused: boolean;
+}
+
+export interface PackageHealthOptions {
+  /** Production code (not a test, story, config, script or browser bundle). */
+  isProduction?: (file: string) => boolean;
+  /** Whether `file` loads `pkg` when it runs (a value import or require — not `import type`, not `import()`). */
+  loads?: (pkg: string, file: string) => boolean;
+  /** Command names (package.json "bin") a declared package provides, to recognise packages run from scripts. */
+  binsOf?: (manifestDir: string, pkg: string) => string[];
+  /** Packages files use without importing them as packages (a workspace imported by name, `react` for JSX). */
+  implicitUse?: Map<string, Set<string>>;
+}
+
+export interface PackageHealth {
   unused: string[];
-  missing: { name: string; files: string[] }[];
-} {
-  const unused: string[] = [];
-  const missing: { name: string; files: string[] }[] = [];
-  const imported = new Set(packages.map((p) => p.name));
-  for (const [name, info] of declared) {
-    if (info.declaredAs !== 'dependencies') continue;
-    if (imported.has(name) || name.startsWith('@types/') || IMPLICIT_PACKAGES.has(name)) continue;
-    if (scriptsText.includes(name)) continue;
-    if (/^(eslint|prettier|@eslint|stylelint|babel-|@babel\/|webpack|rollup|@vitejs|vite-plugin|@nuxt|@nuxtjs|@sveltejs|@tailwindcss|@fontsource|@capacitor)/.test(name)) continue;
-    unused.push(name);
-  }
+  /** Each unused declaration with the package.json that declares it. */
+  unusedDeclarations: { name: string; manifest: string }[];
+  missing: NonNullable<Insights['missingDependencies']>;
+  devDependenciesInProduction: DevDependencyInProduction[];
+  /** How each imported package is declared for the files that import it (first declaration found). */
+  declaredAs: Map<string, { version?: string; declaredAs: DeclaredAs }>;
+}
+
+/**
+ * Packages the runtime host provides, so they are devDependencies on purpose: Electron (electron-builder
+ * refuses it in "dependencies"), the VS Code and Obsidian extension APIs, and the AWS SDK v2 on Lambda.
+ */
+const RUNTIME_PROVIDED = new Set(['electron', 'vscode', 'obsidian', 'aws-sdk']);
+
+/** Packages consumed by tools and frameworks by convention rather than imported (never "unused"). */
+const CONVENTION_PACKAGES_RE =
+  /^(eslint|prettier|@eslint|stylelint|babel-|@babel\/|webpack|rollup|@vitejs|vite-plugin|@nuxt|@nuxtjs|@sveltejs|@tailwindcss|@fontsource|@capacitor|@docusaurus\/|@mdx-js\/)/;
+
+/** Whether `text` mentions `name` as a quoted string (`'@babel/preset-env'`, `"pkg/sub"`). */
+function quotes(text: string | undefined, name: string): boolean {
+  if (!text || !text.includes(name)) return false;
+  return text.includes(`'${name}`) || text.includes(`"${name}`) || text.includes(`\`${name}`);
+}
+
+/** Whether a package is run from the scripts: by a command it provides, or by its scope (`docusaurus start`). */
+function usedByScripts(m: ManifestDeclarations, name: string, binsOf: PackageHealthOptions['binsOf']): boolean {
+  if (m.scripts.includes(name)) return true;
+  const words = new Set(m.scripts.split(/[^\w@./:-]+/));
+  const scope = name.startsWith('@') ? name.slice(1, name.indexOf('/')) : undefined;
+  if (scope && words.has(scope)) return true;
+  return (binsOf?.(m.dir, name) ?? []).some((bin) => words.has(bin));
+}
+
+/**
+ * Unused, missing and misplaced dependencies. Every import is checked against the package.json files
+ * that can provide it: the nearest one and those above it (a sibling workspace's declaration doesn't count).
+ */
+export function markPackageHealth(packages: PackageInfo[], manifests: ManifestDeclarations[], options: PackageHealthOptions = {}): PackageHealth {
+  const chains = new Map<string, ManifestDeclarations[]>();
+  const chainOf = (file: string): ManifestDeclarations[] => {
+    const dir = file.includes('/') ? file.slice(0, file.lastIndexOf('/')) : '';
+    let chain = chains.get(dir);
+    if (!chain) {
+      chain = manifests.filter((m) => !m.dir || dir === m.dir || dir.startsWith(`${m.dir}/`));
+      chains.set(dir, chain);
+    }
+    return chain;
+  };
+  const used = new Map<ManifestDeclarations, Set<string>>();
+  const missing = new Map<string, { files: string[]; manifests: Set<string> }>();
+  const dev = new Map<string, DevDependencyInProduction>();
+  const declaredAs: PackageHealth['declaredAs'] = new Map();
   for (const pkg of packages) {
-    if (pkg.builtin || pkg.declaredAs) continue;
-    missing.push({ name: pkg.name, files: pkg.importedBy.slice(0, 10) });
+    if (pkg.builtin) continue;
+    for (const file of pkg.importedBy) {
+      const chain = chainOf(file);
+      if (!chain.length) continue;
+      for (const m of chain) {
+        const set = used.get(m) ?? new Set<string>();
+        set.add(pkg.name);
+        used.set(m, set);
+      }
+      if (chain[0].name === pkg.name) continue; // self-reference to the nearest package
+      const found = chain.map((m) => ({ m, d: m.declared.get(pkg.name) })).filter((x) => x.d);
+      if (!found.length) {
+        const entry = missing.get(pkg.name) ?? { files: [], manifests: new Set<string>() };
+        entry.files.push(file);
+        entry.manifests.add(chain[0].dir);
+        missing.set(pkg.name, entry);
+        continue;
+      }
+      if (!declaredAs.has(pkg.name)) declaredAs.set(pkg.name, found[0].d!);
+      const devOnly = found.every((x) => x.d!.declaredAs === 'devDependencies');
+      if (!devOnly || pkg.name.startsWith('@types/') || RUNTIME_PROVIDED.has(pkg.name)) continue;
+      if (!options.isProduction?.(file) || (options.loads && !options.loads(pkg.name, file))) continue;
+      const entry = dev.get(pkg.name) ?? { name: pkg.name, files: [], manifest: found[0].m.dir };
+      // The package.json of the importing code should declare it (a root devDependency used by a workspace).
+      if (chain[0].dir !== entry.manifest && entry.declareIn === undefined) entry.declareIn = chain[0].dir;
+      entry.files.push(file);
+      dev.set(pkg.name, entry);
+    }
   }
-  return { unused: unused.sort(), missing: missing.sort((a, b) => b.files.length - a.files.length) };
+  for (const [name, files] of options.implicitUse ?? []) {
+    for (const file of files) {
+      for (const m of chainOf(file)) {
+        const set = used.get(m) ?? new Set<string>();
+        set.add(name);
+        used.set(m, set);
+      }
+    }
+  }
+  const unused = new Set<string>();
+  const unusedDeclarations: PackageHealth['unusedDeclarations'] = [];
+  for (const m of manifests) {
+    if (!m.checkUnused) continue;
+    const imported = used.get(m);
+    for (const [name, info] of m.declared) {
+      if (info.declaredAs !== 'dependencies') continue;
+      if (imported?.has(name) || name.startsWith('@types/') || IMPLICIT_PACKAGES.has(name) || CONVENTION_PACKAGES_RE.test(name)) continue;
+      if (quotes(m.configText, name) || usedByScripts(m, name, options.binsOf)) continue;
+      unused.add(name);
+      unusedDeclarations.push({ name, manifest: m.dir });
+    }
+  }
+  const declarers = (name: string, except: Set<string>): string[] => manifests.filter((m) => !except.has(m.dir) && m.declared.has(name)).map((m) => m.dir);
+  return {
+    unused: [...unused].sort(),
+    unusedDeclarations: unusedDeclarations.sort((a, b) => a.name.localeCompare(b.name) || a.manifest.localeCompare(b.manifest)),
+    missing: [...missing.entries()]
+      .map(([name, { files, manifests: dirs }]) => {
+        const declaredBy = declarers(name, dirs);
+        // Only worth saying in monorepos / nested packages (the root package.json goes without saying).
+        const nested = dirs.size > 1 || !dirs.has('');
+        return { name, files: files.sort().slice(0, 10), ...(nested ? { manifests: [...dirs].sort() } : {}), ...(declaredBy.length ? { declaredBy } : {}) };
+      })
+      .sort((a, b) => b.files.length - a.files.length),
+    devDependenciesInProduction: [...dev.values()]
+      .map((d) => ({ ...d, files: d.files.sort().slice(0, 10) }))
+      .sort((a, b) => b.files.length - a.files.length || a.name.localeCompare(b.name)),
+    declaredAs,
+  };
 }
 
 export function symbolEdgeKey(e: Pick<SymbolEdge, 'source' | 'target' | 'kind'>): string {

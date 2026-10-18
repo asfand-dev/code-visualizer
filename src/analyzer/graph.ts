@@ -1,4 +1,5 @@
 /** Small graph toolkit: strongly connected components, PageRank, traversal. */
+import { tarjan } from '../shared/scc.js';
 
 export type Adjacency = Map<string, Set<string>>;
 
@@ -21,52 +22,10 @@ export function reverse(adj: Adjacency): Adjacency {
 
 /** Tarjan's algorithm (iterative, safe for deep graphs). Returns components with > 1 node or self-loops. */
 export function stronglyConnectedComponents(adj: Adjacency): string[][] {
-  let index = 0;
-  const indices = new Map<string, number>();
-  const low = new Map<string, number>();
-  const onStack = new Set<string>();
-  const stack: string[] = [];
-  const result: string[][] = [];
-
-  for (const start of adj.keys()) {
-    if (indices.has(start)) continue;
-    const work: { node: string; iter: Iterator<string> }[] = [];
-    const push = (node: string): void => {
-      indices.set(node, index);
-      low.set(node, index);
-      index++;
-      stack.push(node);
-      onStack.add(node);
-      work.push({ node, iter: (adj.get(node) ?? new Set<string>()).values() });
-    };
-    push(start);
-    while (work.length) {
-      const frame = work[work.length - 1];
-      const next = frame.iter.next();
-      if (!next.done) {
-        const w = next.value;
-        if (!indices.has(w)) push(w);
-        else if (onStack.has(w)) low.set(frame.node, Math.min(low.get(frame.node)!, indices.get(w)!));
-        continue;
-      }
-      work.pop();
-      if (work.length) {
-        const parent = work[work.length - 1].node;
-        low.set(parent, Math.min(low.get(parent)!, low.get(frame.node)!));
-      }
-      if (low.get(frame.node) === indices.get(frame.node)) {
-        const component: string[] = [];
-        let w: string;
-        do {
-          w = stack.pop()!;
-          onStack.delete(w);
-          component.push(w);
-        } while (w !== frame.node);
-        if (component.length > 1 || adj.get(frame.node)?.has(frame.node)) result.push(component.sort());
-      }
-    }
-  }
-  return result.sort((a, b) => b.length - a.length);
+  return tarjan(adj.keys(), (node) => adj.get(node) ?? [])
+    .filter((c) => c.length > 1 || adj.get(c[0])?.has(c[0]))
+    .map((c) => c.sort())
+    .sort((a, b) => b.length - a.length);
 }
 
 /** Find one concrete cycle path inside a strongly connected component (for readable output). */

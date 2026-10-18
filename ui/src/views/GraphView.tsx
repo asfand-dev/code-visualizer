@@ -11,19 +11,22 @@ import {
   Radar,
   Recycle,
   Route as PathIcon,
+  GitPullRequestArrow,
   SlidersHorizontal,
   X,
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
 import { useModel } from '../data/context';
-import { shortestPath, transitive, type Model } from '../data/model';
+import { transitive } from '../../../src/shared/query';
+import { shortestPath, type Model } from '../data/model';
 import { categorical, freshness, heat, KIND_META } from '../lib/colors';
 import { copyText, downloadBlob, downloadUrl, toDot, toMermaid, type ExportGraph } from '../lib/download';
 import { basename, fmtNum, plural } from '../lib/format';
 import { select, selectFile, useStore, type GraphMode } from '../state/store';
 import type { FileInfo, FileKind } from '../types';
 import { baseStyle, ensureCytoscape, fitTo, themeColors } from '../components/cy';
+import { personColor } from '../components/companion';
 import { KindDot, SearchInput, Select, Toggle } from '../components/ui';
 
 /* -------------------------------------------------------------------------- */
@@ -31,7 +34,7 @@ import { KindDot, SearchInput, Select, Toggle } from '../components/ui';
 /* -------------------------------------------------------------------------- */
 
 type LayoutName = 'fcose' | 'dagre' | 'dagre-tb' | 'concentric' | 'circle' | 'grid';
-type ColorBy = 'kind' | 'folder' | 'complexity' | 'churn' | 'importance' | 'age';
+type ColorBy = 'kind' | 'folder' | 'complexity' | 'churn' | 'importance' | 'age' | 'owner';
 type SizeBy = 'loc' | 'fanIn' | 'importance' | 'uniform';
 
 interface Settings {
@@ -47,6 +50,7 @@ interface Settings {
   showPackages: boolean;
   labels: boolean;
   cycles: boolean;
+  showChanges: boolean;
   hiddenKinds: FileKind[];
 }
 
@@ -105,6 +109,7 @@ function initialSettings(model: Model): Settings {
     showPackages: false,
     labels: true,
     cycles: model.data.insights.cycles.length > 0 && model.data.insights.cycles.length < 20,
+    showChanges: true,
     hiddenKinds: [],
   };
   const files = filterFiles(model, base);
@@ -154,6 +159,7 @@ interface NodeStats {
   kinds?: Map<FileKind, number>;
   inCycle?: boolean;
   scope?: string;
+  authors?: Map<string, number>;
 }
 
 interface GEdge {
@@ -187,10 +193,10 @@ function buildGraph(model: Model, s: Settings, mode: Mode): Built {
     let keep: Set<string>;
     if (mode.type === 'focus') {
       keep = new Set([mode.id]);
-      if (mode.direction !== 'dependents') for (const id of transitive(model, mode.id, 'deps', mode.depth, runtimeOnly).keys()) keep.add(id);
-      if (mode.direction !== 'deps') for (const id of transitive(model, mode.id, 'dependents', mode.depth, runtimeOnly).keys()) keep.add(id);
+      if (mode.direction !== 'dependents') for (const id of transitive(model.data, mode.id, 'deps', mode.depth, runtimeOnly).keys()) keep.add(id);
+      if (mode.direction !== 'deps') for (const id of transitive(model.data, mode.id, 'dependents', mode.depth, runtimeOnly).keys()) keep.add(id);
     } else if (mode.type === 'impact') {
-      keep = new Set([mode.id, ...transitive(model, mode.id, 'dependents', Infinity, runtimeOnly).keys()]);
+      keep = new Set([mode.id, ...transitive(model.data, mode.id, 'dependents', Infinity, runtimeOnly).keys()]);
     } else {
       keep = new Set(mode.files);
     }
@@ -241,6 +247,11 @@ function buildGraph(model: Model, s: Settings, mode: Mode): Built {
     n.lastModified = Math.max(n.lastModified, f.git?.lastModified ?? 0);
     if (f.inCycle) n.inCycle = true;
     n.kinds?.set(f.kind, (n.kinds.get(f.kind) ?? 0) + 1);
+    const top = f.git?.authors[0];
+    if (top) {
+      n.authors ??= new Map();
+      n.authors.set(top.name, (n.authors.get(top.name) ?? 0) + f.git!.commits);
+    }
   }
   for (const n of stats.values()) {
     if (n.type === 'folder') {
@@ -370,6 +381,10 @@ function decorate(built: Built, s: Settings, model: Model): Map<string, { color:
     else if (s.colorBy === 'churn') color = model.data.git ? heat(n.commits / maxCommits) : '#7c8aa5';
     else if (s.colorBy === 'importance') color = heat(Math.sqrt(n.importance));
     else if (s.colorBy === 'age') color = n.lastModified ? freshness((now - n.lastModified) / (365 * 86_400_000)) : '#64748b';
+    else if (s.colorBy === 'owner') {
+      const owner = n.authors ? [...n.authors.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] : undefined;
+      color = owner ? personColor(owner) : '#64748b';
+    }
     let size = 26;
     if (n.type === 'folder') size = 44 + 46 * Math.sqrt(n.files / maxFiles);
     else if (n.type === 'package') size = 18 + 18 * Math.sqrt(n.fanIn / maxFan);
@@ -470,11 +485,17 @@ export function GraphView() {
   // Requests from other views ("Show in graph", "Impact", …)
   useEffect(() => {
     if (!request || request.nonce === lastRequestNonce) return;
+    if (request.mode === 'changes') setSettings({ showChanges: true });
     lastRequestNonce = request.nonce;
     const kind: GraphMode = request.mode;
     if (kind === 'focus' && request.files[0]) setMode({ type: 'focus', id: request.files[0], depth: 1, direction: 'both' });
     else if (kind === 'impact' && request.files[0]) setMode({ type: 'impact', id: request.files[0] });
     else if (kind === 'cycle') setMode({ type: 'subset', files: request.files, label: `Circular dependency · ${plural(request.files.length, 'file')}`, cycle: true });
+    else if (kind === 'changes') {
+      const changed = request.files.length ? request.files : [...model.changed.values()].filter((f) => f.analyzed).map((f) => f.id);
+      const affected = [...model.impacted].slice(0, Math.max(0, 300 - changed.length));
+      setMode({ type: 'subset', files: [...changed, ...affected], label: `Blast radius · ${plural(changed.length, 'changed file')} → ${plural(model.impacted.size, 'affected file')}` });
+    }
     else if (request.files.length) setMode({ type: 'subset', files: request.files, label: plural(request.files.length, 'selected file') });
   }, [request, setMode]);
 
@@ -691,7 +712,17 @@ export function GraphView() {
     const cy = cyRef.current;
     if (!cy) return;
     cy.batch(() => {
-      cy.elements().removeClass('faded focus match out in path dep dependent cycle dim');
+      cy.elements().removeClass('faded focus match out in path dep dependent cycle dim changed affected');
+      if (settings.showChanges && model.changed.size) {
+        const changedReps = new Set<string>();
+        const affectedReps = new Set<string>();
+        for (const [fileId, rep] of built.repOfFile) {
+          if (model.changed.has(fileId)) changedReps.add(rep);
+          else if (model.impacted.has(fileId)) affectedReps.add(rep);
+        }
+        for (const id of changedReps) cy.getElementById(id).addClass('changed');
+        for (const id of affectedReps) if (!changedReps.has(id)) cy.getElementById(id).addClass('affected');
+      }
       const q = search.trim().toLowerCase();
       if (q) {
         const matches = cy.nodes().filter((n) => n.data('type') !== 'group' && (n.id().toLowerCase().includes(q) || String(n.data('label')).toLowerCase().includes(q)));
@@ -723,7 +754,7 @@ export function GraphView() {
         }
       }
     });
-  }, [active, search, mode, elements]);
+  }, [active, search, mode, elements, settings.showChanges, model, built]);
 
   const fit = (): void => {
     const cy = cyRef.current;
@@ -813,6 +844,15 @@ export function GraphView() {
         <div className="sep desktop-only" />
         <SearchInput value={search} onChange={setSearch} placeholder="Highlight files…" style={{ width: 200 }} />
         <span className="spacer" />
+        {[...model.changed.values()].some((f) => f.analyzed) && (
+          <button
+            className={`btn sm${settings.showChanges ? ' active' : ''}`}
+            onClick={() => setSettings({ showChanges: !settings.showChanges })}
+            title="Outline the files you changed (solid) and the files they affect (dashed)"
+          >
+            <GitPullRequestArrow size={13} /> My changes
+          </button>
+        )}
         {model.data.insights.cycles.length > 0 && (
           <button className={`btn sm${settings.cycles ? ' active' : ''}`} onClick={() => setSettings({ cycles: !settings.cycles })} title="Highlight circular dependencies in red">
             <Recycle size={13} /> Cycles
@@ -840,6 +880,7 @@ export function GraphView() {
             { value: 'folder', label: 'Color: folder' },
             { value: 'complexity', label: 'Color: complexity' },
             { value: 'importance', label: 'Color: importance' },
+            ...(model.data.git ? [{ value: 'owner' as const, label: 'Color: owner' }] : []),
             ...(model.data.git
               ? [
                   { value: 'churn' as const, label: 'Color: churn' },
@@ -998,7 +1039,19 @@ export function GraphView() {
             </button>
           )}
         </div>
-        {settings.colorBy === 'kind' ? (
+        {settings.colorBy === 'owner' ? (
+          <div className="floating legend">
+            {(model.data.git?.contributors ?? []).slice(0, 8).map((c) => (
+              <span key={c.name} className="legend-item" style={{ cursor: 'default' }}>
+                <span className="dot" style={{ ['--c' as string]: personColor(c.name) }} />
+                {c.name}
+              </span>
+            ))}
+            <span className="legend-item faint" style={{ cursor: 'default' }}>
+              colored by who changed the file most
+            </span>
+          </div>
+        ) : settings.colorBy === 'kind' ? (
           <div className="floating legend">
             {kindsPresent.map((k) => (
               <span key={k} className="legend-item" onClick={() => setSettings({ hiddenKinds: [...settings.hiddenKinds, k] })} title="Click to hide">
@@ -1020,6 +1073,12 @@ export function GraphView() {
             <span className="legend-item faint" style={{ cursor: 'default' }}>
               <span style={{ color: '#60a5fa' }}>→</span> imports <span style={{ color: '#fb923c' }}>→</span> imported by
             </span>
+            {settings.showChanges && model.changed.size > 0 && (
+              <span className="legend-item faint" style={{ cursor: 'default' }}>
+                <span style={{ width: 10, height: 10, borderRadius: '50%', border: '2.5px solid #fbbf24' }} /> changed
+                <span style={{ width: 10, height: 10, borderRadius: '50%', border: '2px dashed #fb923c', marginLeft: 6 }} /> affected
+              </span>
+            )}
           </div>
         ) : (
           <div className="floating legend" style={{ alignItems: 'center' }}>

@@ -1,0 +1,24 @@
+{
+  "$schema": "https://aka.ms/codetour-schema",
+  "title": "Intro to the users feature",
+  "description": "How the user list travels from the database to the screen.",
+  "steps": [
+    {
+      "title": "The API",
+      "description": "Route handlers live next to the URL they serve.",
+      "file": "app/api/users/route.ts",
+      "line": 4
+    },
+    {
+      "title": "The table",
+      "description": "The client component fetches `/api/users`.",
+      "file": "./components/UserTable.tsx",
+      "selection": { "start": { "line": 11, "character": 1 }, "end": { "line": 15, "character": 1 } }
+    },
+    {
+      "title": "Shared code",
+      "description": "Helpers used by both sides.",
+      "directory": "lib"
+    }
+  ]
+}

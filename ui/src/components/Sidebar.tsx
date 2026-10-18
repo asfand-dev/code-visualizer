@@ -20,7 +20,11 @@ export function useNavEntries(): NavEntry[] {
     data.insights.orphans.length +
     data.insights.unusedDependencies.length +
     data.insights.missingDependencies.length;
+  const changed = data.changes?.files.length ?? 0;
   const entries: NavEntry[] = [
+    { id: 'today', label: 'Today', section: 'Workspace' },
+    { id: 'changes', label: 'My changes', section: 'Workspace', count: changed || undefined },
+    { id: 'search', label: 'Search code', section: 'Workspace' },
     { id: 'overview', label: 'Overview', section: 'Explore' },
     { id: 'tour', label: 'Guided tour', section: 'Explore', count: data.tour.length },
     { id: 'graph', label: 'Dependency graph', section: 'Explore', count: data.files.length },
@@ -33,7 +37,8 @@ export function useNavEntries(): NavEntry[] {
   if (model.hasRoutes) entries.push({ id: 'routes', label: 'Routes & APIs', section: 'Code', count: data.routes.length });
   if (model.hasCalls) entries.push({ id: 'flow', label: 'Call flow', section: 'Code' });
   entries.push({ id: 'packages', label: 'Packages', section: 'Code', count: data.packages.filter((p) => !p.builtin && p.importedBy.length).length });
-  entries.push({ id: 'insights', label: 'Insights', section: 'Health', count: issues || undefined });
+  if (model.hasGit) entries.push({ id: 'activity', label: 'Activity & team', section: 'Team & health', count: data.git?.contributors.length });
+  entries.push({ id: 'insights', label: 'Health & insights', section: 'Team & health', count: issues || undefined });
   return entries;
 }
 

@@ -1,0 +1,21 @@
+{
+  "rules": [
+    {
+      "name": "ui-uses-shared-only",
+      "from": "ui/src/**",
+      "to": "src/**",
+      "allow": "src/shared/**",
+      "message": "The report UI runs in the browser and may only import src/shared"
+    },
+    {
+      "name": "shared-is-standalone",
+      "from": "src/shared/**",
+      "to": "src/**",
+      "allow": "src/shared/**",
+      "message": "src/shared is used by the browser UI and must not depend on Node-side code"
+    }
+  ],
+  "check": {
+    "maxCycles": 0
+  }
+}

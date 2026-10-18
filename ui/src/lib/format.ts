@@ -21,9 +21,16 @@ export function timeAgo(ts: number | undefined): string {
   const day = 86_400_000;
   if (diff < 3_600_000) return `${Math.max(1, Math.round(diff / 60_000))} min ago`;
   if (diff < day) return `${Math.round(diff / 3_600_000)} h ago`;
-  if (diff < 30 * day) return `${Math.round(diff / day)} days ago`;
-  if (diff < 365 * day) return `${Math.round(diff / (30 * day))} months ago`;
-  return `${(diff / (365 * day)).toFixed(1)} years ago`;
+  if (diff < 30 * day) {
+    const days = Math.round(diff / day);
+    return days <= 1 ? 'yesterday' : `${days} days ago`;
+  }
+  if (diff < 365 * day) {
+    const months = Math.round(diff / (30 * day));
+    return months <= 1 ? '1 month ago' : `${months} months ago`;
+  }
+  const years = Math.round((diff / (365 * day)) * 10) / 10;
+  return `${years} ${years === 1 ? 'year' : 'years'} ago`;
 }
 
 export function fmtDate(ts: number | string | undefined): string {

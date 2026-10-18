@@ -1,4 +1,6 @@
 import type {
+  ApiCall,
+  ChangedFile,
   DependencyEdge,
   FileInfo,
   FileKind,
@@ -53,6 +55,13 @@ export interface Model {
   hasClasses: boolean;
   hasRoutes: boolean;
   hasCalls: boolean;
+  hasGit: boolean;
+  /** Changed files of your current work (uncommitted / branch). */
+  changed: Map<string, ChangedFile>;
+  /** Files affected by your changes through imports. */
+  impacted: Set<string>;
+  apiByRoute: Map<string, ApiCall[]>;
+  apiByFile: Map<string, ApiCall[]>;
   resolveSymbol(id: string): SymbolRef | undefined;
 }
 
@@ -72,7 +81,11 @@ function push<K, V>(map: Map<K, V[]>, key: K, value: V): void {
   else map.set(key, [value]);
 }
 
+import { registerPeople } from '../lib/people';
+import { importPath, pathFiles } from '../../../src/shared/query';
+
 export function buildModel(data: ReportData): Model {
+  registerPeople((data.git?.contributors ?? []).map((c) => c.name));
   const fileById = new Map(data.files.map((f) => [f.id, f]));
   const symbolById = new Map<string, { symbol: SymbolInfo; file: FileInfo }>();
   for (const file of data.files) for (const symbol of file.symbols) symbolById.set(symbol.id, { symbol, file });
@@ -166,6 +179,13 @@ export function buildModel(data: ReportData): Model {
     return result;
   };
 
+  const apiByRoute = new Map<string, ApiCall[]>();
+  const apiByFile = new Map<string, ApiCall[]>();
+  for (const c of data.apiCalls ?? []) {
+    if (c.route) push(apiByRoute, c.route, c);
+    push(apiByFile, c.file, c);
+  }
+
   return {
     data,
     files: data.files,
@@ -187,6 +207,11 @@ export function buildModel(data: ReportData): Model {
     hasClasses: allSymbols.some((s) => s.kind === 'class' || s.kind === 'interface' || s.kind === 'enum'),
     hasRoutes: data.routes.length > 0,
     hasCalls: data.symbolEdges.some((e) => e.kind === 'calls'),
+    hasGit: !!data.git,
+    changed: new Map((data.changes?.files ?? []).map((f) => [f.id, f])),
+    impacted: new Set(data.changes?.impacted ?? []),
+    apiByRoute,
+    apiByFile,
     resolveSymbol,
   };
 }
@@ -195,58 +220,13 @@ export function buildModel(data: ReportData): Model {
 /*                              Graph algorithms                              */
 /* -------------------------------------------------------------------------- */
 
-export function transitive(model: Model, start: string, direction: 'deps' | 'dependents', maxDepth = Infinity, runtimeOnly = false): Map<string, number> {
-  const depth = new Map<string, number>([[start, 0]]);
-  const queue = [start];
-  while (queue.length) {
-    const node = queue.shift()!;
-    const d = depth.get(node)!;
-    if (d >= maxDepth) continue;
-    const edges = direction === 'deps' ? model.out.get(node) : model.in.get(node);
-    for (const e of edges ?? []) {
-      if (runtimeOnly && e.typeOnly) continue;
-      const next = direction === 'deps' ? e.target : e.source;
-      if (depth.has(next)) continue;
-      depth.set(next, d + 1);
-      queue.push(next);
-    }
-  }
-  depth.delete(start);
-  return depth;
-}
+// The walks live in the shared query core (also used by the CLI, MCP and hooks).
+export { callersOf, calleesOf, importPath, pathFiles, symbolRef, transitive, usesOf } from '../../../src/shared/query';
 
 /** Shortest import path from a to b (following imports), or from b to a. */
 export function shortestPath(model: Model, a: string, b: string): string[] | undefined {
-  const search = (from: string, to: string): string[] | undefined => {
-    const prev = new Map<string, string>();
-    const seen = new Set([from]);
-    const queue = [from];
-    while (queue.length) {
-      const node = queue.shift()!;
-      if (node === to) {
-        const path = [to];
-        let cur = to;
-        while (cur !== from) {
-          cur = prev.get(cur)!;
-          path.push(cur);
-        }
-        return path.reverse();
-      }
-      for (const e of model.out.get(node) ?? []) {
-        if (seen.has(e.target)) continue;
-        seen.add(e.target);
-        prev.set(e.target, node);
-        queue.push(e.target);
-      }
-    }
-    return undefined;
-  };
-  return search(a, b) ?? search(b, a);
-}
-
-/** Folder at a given depth for a file id (`src/components/ui/Button.tsx`, 2 → `src/components`). */
-export function folderAtDepth(fileDir: string, depth: number): string {
-  if (!fileDir) return '';
-  const parts = fileDir.split('/');
-  return parts.slice(0, depth).join('/');
+  const forward = importPath(model.data, a, b);
+  if (forward) return pathFiles(a, forward);
+  const back = importPath(model.data, b, a);
+  return back ? pathFiles(b, back) : undefined;
 }

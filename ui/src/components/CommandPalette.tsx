@@ -1,14 +1,19 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { ArrowRight, CornerDownLeft, Folder, Moon, Package, Search } from 'lucide-react';
+import { ArrowRight, ClipboardCopy, CornerDownLeft, Folder, Moon, Package, Pin, Search, TextSearch } from 'lucide-react';
+import { prSummaryMarkdown, projectSummaryMarkdown } from '../../../src/shared/markdown';
+import { copyText } from '../lib/download';
+import { plural } from '../lib/format';
+import { describeKey } from '../lib/keys';
+import { usePersonal } from '../state/personal';
 import { useModel } from '../data/context';
 import { KIND_META, METHOD_COLORS } from '../lib/colors';
-import { setState, toggleTheme, type Selection, type ViewId } from '../state/store';
+import { searchCode, setState, toast, toggleTheme, type Selection, type ViewId } from '../state/store';
 import { useNavEntries } from './Sidebar';
 import { VIEW_ICONS } from './icons';
 import { KindDot, SymbolIcon } from './ui';
 import type { FileKind, SymbolKind } from '../types';
 
-type ItemType = 'view' | 'action' | 'file' | 'symbol' | 'route' | 'package' | 'folder';
+type ItemType = 'pinned' | 'view' | 'action' | 'file' | 'symbol' | 'route' | 'package' | 'folder' | 'text';
 
 interface Item {
   type: ItemType;
@@ -24,6 +29,8 @@ interface Item {
 }
 
 const GROUP_LABELS: Record<ItemType, string> = {
+  pinned: 'Pinned',
+  text: 'Code search',
   view: 'Views',
   action: 'Actions',
   file: 'Files',
@@ -33,7 +40,7 @@ const GROUP_LABELS: Record<ItemType, string> = {
   folder: 'Folders',
 };
 
-const GROUP_ORDER: ItemType[] = ['view', 'action', 'file', 'symbol', 'route', 'folder', 'package'];
+const GROUP_ORDER: ItemType[] = ['pinned', 'view', 'action', 'file', 'symbol', 'route', 'folder', 'package', 'text'];
 
 /** Fuzzy score: substring matches win, then subsequence matches; returns matched indices for highlighting. */
 function score(query: string, text: string): { score: number; hits: number[] } | undefined {
@@ -83,6 +90,7 @@ export function CommandPalette() {
   const [query, setQuery] = useState('');
   const [active, setActive] = useState(0);
   const listRef = useRef<HTMLDivElement>(null);
+  const pins = usePersonal((s) => s.pins);
   const close = (): void => setState({ paletteOpen: false });
   const choose = (selection: Selection): void => setState({ selection, paletteOpen: false, detailTab: undefined });
 
@@ -92,6 +100,14 @@ export function CommandPalette() {
       list.push({ type: 'view', key: `view:${e.id}`, label: `Go to ${e.label}`, search: `${e.label} ${e.id}`, weight: 5, run: () => setState({ view: e.id as ViewId, paletteOpen: false }) });
     }
     list.push({ type: 'action', key: 'action:theme', label: 'Toggle dark / light theme', search: 'theme dark light mode', weight: 3, run: () => (toggleTheme(), close()) });
+    const copy = (text: string, what: string): void => {
+      void copyText(text).then((ok) => ok && toast(`${what} copied to the clipboard`));
+      close();
+    };
+    if (model.data.changes?.files.length) {
+      list.push({ type: 'action', key: 'action:pr', label: 'Copy PR description for my changes', search: 'copy pr pull request description summary changes review', weight: 6, run: () => copy(prSummaryMarkdown(model.data), 'PR description') });
+    }
+    list.push({ type: 'action', key: 'action:summary', label: 'Copy project summary (for AI assistants / onboarding docs)', search: 'copy project summary ai agents claude markdown onboarding', weight: 4, run: () => copy(projectSummaryMarkdown(model.data), 'Project summary') });
     for (const f of model.files) {
       list.push({ type: 'file', key: `file:${f.id}`, label: f.name, sub: f.id, search: f.id, weight: 10 + f.metrics.importance * 50, kind: f.kind, run: () => choose({ type: 'file', id: f.id }) });
       for (const s of f.symbols) {
@@ -112,23 +128,34 @@ export function CommandPalette() {
     }
     for (const p of model.data.packages) {
       if (p.builtin && !p.importedBy.length) continue;
-      list.push({ type: 'package', key: `pkg:${p.name}`, label: p.name, sub: `${p.importedBy.length} files${p.version ? ` · ${p.version}` : ''}`, search: p.name, weight: 6, run: () => choose({ type: 'package', id: p.name }) });
+      list.push({ type: 'package', key: `pkg:${p.name}`, label: p.name, sub: `${plural(p.importedBy.length, 'file')}${p.version ? ` · ${p.version}` : ''}`, search: p.name, weight: 6, run: () => choose({ type: 'package', id: p.name }) });
     }
     for (const folder of model.folderByPath.values()) {
       if (!folder.path) continue;
-      list.push({ type: 'folder', key: `folder:${folder.path}`, label: `${folder.path}/`, sub: `${folder.fileCount} files`, search: folder.path, weight: 7, run: () => choose({ type: 'folder', id: folder.path }) });
+      list.push({ type: 'folder', key: `folder:${folder.path}`, label: `${folder.path}/`, sub: plural(folder.fileCount, 'file'), search: folder.path, weight: 7, run: () => choose({ type: 'folder', id: folder.path }) });
     }
     return list;
   }, [model, navEntries]);
 
+  const pinnedItems = useMemo<Item[]>(
+    () =>
+      pins
+        .map((key) => describeKey(model, key))
+        .filter((p): p is NonNullable<typeof p> => !!p?.exists)
+        .slice(0, 8)
+        .map((p) => ({ type: 'pinned' as const, key: `pin:${p.key}`, label: p.label, sub: p.sub, search: p.label, weight: 20, run: () => (p.open(), close()) })),
+    [pins, model],
+  );
+
   const results = useMemo(() => {
     if (!query.trim()) {
+      const pinnedFirst = pinnedItems;
       const views = items.filter((i) => i.type === 'view');
       const files = items
         .filter((i) => i.type === 'file')
         .sort((a, b) => b.weight - a.weight)
         .slice(0, 8);
-      return [...views, ...files].map((item) => ({ item, hits: [] as number[] }));
+      return [...pinnedFirst, ...views, ...files].map((item) => ({ item, hits: [] as number[] }));
     }
     const q = query.trim();
     const scored: { item: Item; hits: number[]; s: number }[] = [];
@@ -144,8 +171,9 @@ export function CommandPalette() {
     const best = new Map<ItemType, number>();
     for (const r of top) if (!best.has(r.item.type)) best.set(r.item.type, r.s);
     const groups = [...GROUP_ORDER].filter((g) => best.has(g)).sort((a, b) => best.get(b)! - best.get(a)!);
-    return groups.flatMap((g) => top.filter((r) => r.item.type === g).slice(0, g === 'symbol' || g === 'file' ? 20 : 8));
-  }, [items, query]);
+    const textItem: Item = { type: 'text', key: 'text:search', label: `Search code for “${q}”`, sub: 'full-text search in every file  ⇧↵', search: q, weight: 0, run: () => searchCode(q) };
+    return [...groups.flatMap((g) => top.filter((r) => r.item.type === g).slice(0, g === 'symbol' || g === 'file' ? 20 : 8)), { item: textItem, hits: [] as number[] }];
+  }, [items, query, pinnedItems]);
 
   useEffect(() => setActive(0), [query]);
   useEffect(() => {
@@ -159,6 +187,9 @@ export function CommandPalette() {
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
       setActive((a) => Math.max(0, a - 1));
+    } else if (e.key === 'Enter' && e.shiftKey && query.trim()) {
+      e.preventDefault();
+      searchCode(query.trim());
     } else if (e.key === 'Enter') {
       e.preventDefault();
       results[active]?.item.run();
@@ -196,7 +227,9 @@ export function CommandPalette() {
                   {item.type === 'package' && <Package size={15} className="muted" />}
                   {item.type === 'folder' && <Folder size={15} className="muted" />}
                   {ViewIcon && <ViewIcon size={15} className="muted" />}
-                  {item.type === 'action' && <Moon size={15} className="muted" />}
+                  {item.type === 'action' && (item.key === 'action:theme' ? <Moon size={15} className="muted" /> : <ClipboardCopy size={15} className="muted" />)}
+                  {item.type === 'pinned' && <Pin size={15} style={{ color: 'var(--accent)' }} />}
+                  {item.type === 'text' && <TextSearch size={15} className="muted" />}
                   <span className="p-label">{item.type === 'file' || item.type === 'symbol' || item.type === 'route' || item.type === 'package' || item.type === 'folder' ? highlight(item.label, hits) : item.label}</span>
                   {item.sub && <span className="p-sub">{item.sub}</span>}
                   {item.kind && <span className="tiny faint">{KIND_META[item.kind].label}</span>}
@@ -218,7 +251,11 @@ export function CommandPalette() {
             open
           </span>
           <span className="row nowrap">
-            <kbd>/</kbd> or <kbd>⌘K</kbd> to search anytime
+            <kbd>⇧</kbd>
+            <kbd>
+              <CornerDownLeft size={11} />
+            </kbd>{' '}
+            search code text
           </span>
           <span className="spacer" />
           <span>{items.length.toLocaleString('en-US')} items indexed</span>

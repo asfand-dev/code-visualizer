@@ -1,7 +1,6 @@
 import path from 'node:path';
 import { builtinModules } from 'node:module';
 import type { PathsConfig, ProjectContext, WorkspacePackage } from './project.js';
-import { toPosix } from './project.js';
 
 export type Resolution =
   | { type: 'file'; id: string }
@@ -12,6 +11,30 @@ export type Resolution =
   | { type: 'unresolved' };
 
 export const SOURCE_EXTENSIONS = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs', '.vue', '.svelte', '.astro'];
+
+/** `a\\b` → `a/b` (this module is loaded without project.ts, by the MCP server's specifier mapping too). */
+const toPosix = (p: string): string => p.split(path.sep).join('/');
+
+/**
+ * The project file a project-relative module path names (`base` without `..` segments): the path itself,
+ * with a source extension, its index file, or the TypeScript source of an ESM `.js` path. Shared by the
+ * resolver and the MCP server's specifier mapping (src/mcp/specifier.ts).
+ */
+export function lookupModule(files: ReadonlySet<string>, base: string): string | undefined {
+  const clean = base === '.' ? '' : base.replace(/\/$/, '');
+  if (clean && files.has(clean)) return clean;
+  for (const ext of SOURCE_EXTENSIONS) if (files.has(clean + ext)) return clean + ext;
+  const indexBase = clean ? `${clean}/index` : 'index';
+  for (const ext of SOURCE_EXTENSIONS) if (files.has(indexBase + ext)) return indexBase + ext;
+  // TypeScript ESM style: `./foo.js` → `./foo.ts`
+  const m = clean.match(/^(.*)\.(m|c)?jsx?$/);
+  if (m) {
+    const stem = m[1];
+    const variants = m[2] === 'm' ? ['.mts', '.ts'] : m[2] === 'c' ? ['.cts', '.ts'] : ['.ts', '.tsx'];
+    for (const ext of variants) if (files.has(stem + ext)) return stem + ext;
+  }
+  return undefined;
+}
 
 const ASSET_RE =
   /\.(css|scss|sass|less|styl|pcss|postcss|svg|png|jpe?g|gif|webp|avif|ico|bmp|json|json5|md|mdx|html?|txt|woff2?|ttf|otf|eot|mp4|webm|mp3|wav|ogg|wasm|graphql|gql|ya?ml|csv|toml|glsl|frag|vert|pdf)$/i;
@@ -148,20 +171,7 @@ export class ModuleResolver {
   /** Find a project file for a project-relative path, trying extensions and index files. */
   lookup(base: string): string | undefined {
     if (!base || base.startsWith('..')) return undefined;
-    const clean = base === '.' ? '' : base.replace(/\/$/, '');
-    if (clean && this.files.has(clean)) return clean;
-    const prefix = clean ? `${clean}` : '';
-    for (const ext of SOURCE_EXTENSIONS) if (this.files.has(prefix + ext)) return prefix + ext;
-    const indexBase = clean ? `${clean}/index` : 'index';
-    for (const ext of SOURCE_EXTENSIONS) if (this.files.has(indexBase + ext)) return indexBase + ext;
-    // TypeScript ESM style: `./foo.js` → `./foo.ts`
-    const m = clean.match(/^(.*)\.(m|c)?jsx?$/);
-    if (m) {
-      const stem = m[1];
-      const variants = m[2] === 'm' ? ['.mts', '.ts'] : m[2] === 'c' ? ['.cts', '.ts'] : ['.ts', '.tsx'];
-      for (const ext of variants) if (this.files.has(stem + ext)) return stem + ext;
-    }
-    return undefined;
+    return lookupModule(this.files, base);
   }
 
   private configsFor(fromId: string): PathsConfig[] {

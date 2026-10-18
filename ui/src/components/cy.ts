@@ -171,6 +171,8 @@ export function baseStyle(t: ThemeColors, opts: { labels?: boolean; curve?: 'bez
     { selector: 'node.dep', style: { 'border-width': 3, 'border-color': '#60a5fa' } as never },
     { selector: 'node.dependent', style: { 'border-width': 3, 'border-color': '#fb923c' } as never },
     { selector: 'node.cycle', style: { 'border-width': 3, 'border-color': t.danger } as never },
+    { selector: 'node.changed', style: { 'border-width': 4, 'border-color': '#fbbf24', 'border-opacity': 1, 'z-index': 25 } as never },
+    { selector: 'node.affected', style: { 'border-width': 2.5, 'border-color': '#fb923c', 'border-style': 'dashed', 'border-opacity': 0.9 } as never },
   ];
 }
 
