@@ -1,12 +1,15 @@
 import { useMemo, useState } from 'react';
 import { AlertTriangle, Box, Cpu, Package, PackageCheck, PackageX } from 'lucide-react';
+import { LICENSE_RISK_LABEL, needsReview } from '../../../src/shared/licenses';
 import { useModel } from '../data/context';
 import { fmtNum, plural } from '../lib/format';
 import { select, useStore } from '../state/store';
-import type { PackageInfo } from '../types';
+import type { LicenseRisk, PackageInfo } from '../types';
 import { BarList, SearchInput, Segmented, Stat } from '../components/ui';
 
-type Filter = 'all' | 'external' | 'builtin' | 'unused' | 'missing' | 'dev' | 'production';
+type Filter = 'all' | 'external' | 'builtin' | 'unused' | 'missing' | 'dev' | 'production' | 'license' | 'scripts';
+
+const LICENSE_TONE: Record<LicenseRisk, string> = { permissive: '', 'weak-copyleft': 'info', copyleft: 'warn', proprietary: 'danger', unknown: 'warn' };
 type Sort = 'files' | 'name' | 'imports';
 
 export function PackagesView() {
@@ -21,6 +24,10 @@ export function PackagesView() {
   // accuracy-pass: a package one package.json declares without using (while other code imports it) counts too
   const unused = pkgs.filter((p) => p.unused || p.unusedIn?.length);
   const missing = pkgs.filter((p) => p.missing);
+  // dev-tools: what is installed, from node_modules (nothing when dependencies are not installed)
+  const hasInstalled = pkgs.some((p) => p.installed);
+  const review = pkgs.filter((p) => needsReview(p.licenseRisk));
+  const withScripts = pkgs.filter((p) => p.installScripts?.length);
   // accuracy-pass: devDependencies that production code imports
   const devInProduction = useMemo(() => new Map((model.data.insights.devDependenciesInProduction ?? []).map((d) => [d.name, d])), [model]);
   const manifestLabel = (dir: string): string => (dir ? `${dir}/package.json` : 'package.json');
@@ -41,6 +48,10 @@ export function PackagesView() {
           return p.declaredAs === 'devDependencies' && p.importedBy.length > 0;
         case 'production':
           return devInProduction.has(p.name);
+        case 'license':
+          return needsReview(p.licenseRisk);
+        case 'scripts':
+          return !!p.installScripts?.length;
         default:
           return true;
       }
@@ -98,6 +109,7 @@ export function PackagesView() {
               { value: 'unused', label: `Unused (${unused.length})` },
               { value: 'missing', label: `Missing (${missing.length})` },
               ...(devInProduction.size ? [{ value: 'production' as const, label: `Dev deps in production (${devInProduction.size})` }] : []),
+              ...(hasInstalled ? [{ value: 'license' as const, label: `License review (${review.length})` }, { value: 'scripts' as const, label: `Install scripts (${withScripts.length})` }] : []),
               { value: 'all', label: 'All' },
             ]}
           />
@@ -112,6 +124,7 @@ export function PackagesView() {
                   Package {sort === 'name' && '↓'}
                 </th>
                 <th>Version</th>
+                {hasInstalled && <th>License</th>}
                 <th>Declared as</th>
                 <th className="num sortable" onClick={() => setSort('files')}>
                   Files {sort === 'files' && '↓'}
@@ -132,9 +145,30 @@ export function PackagesView() {
                         {p.name}
                       </span>
                       {p.typeOnly && p.importedBy.length > 0 && <span className="badge">types</span>}
+                      {!!p.installScripts?.length && (
+                        <span className="badge warn" title={`Runs code on npm install (${p.installScripts.join(', ')}): review it, or install with --ignore-scripts`}>
+                          install script
+                        </span>
+                      )}
                     </span>
                   </td>
-                  <td className="mono small muted">{p.version ?? (p.builtin ? 'built-in' : '—')}</td>
+                  <td className="mono small muted">
+                    {p.version ?? (p.builtin ? 'built-in' : '—')}
+                    {p.installed && p.installed !== p.version && <div className="tiny faint">installed {p.installed}</div>}
+                  </td>
+                  {hasInstalled && (
+                    <td className="small">
+                      {p.licenseRisk === undefined ? (
+                        <span className="faint">—</span>
+                      ) : LICENSE_TONE[p.licenseRisk] ? (
+                        <span className={`badge ${LICENSE_TONE[p.licenseRisk]}`} title={`${LICENSE_RISK_LABEL[p.licenseRisk]}${p.license ? `: ${p.license}` : ''}`}>
+                          {p.license ?? 'no license'}
+                        </span>
+                      ) : (
+                        <span className="muted">{p.license}</span>
+                      )}
+                    </td>
+                  )}
                   <td className="small">
                     {p.declaredAs ?? (p.builtin ? '' : <span style={{ color: 'var(--danger)' }}>not declared</span>)}
                     {devInProduction.has(p.name) && (
@@ -157,10 +191,11 @@ export function PackagesView() {
               ))}
             </tbody>
           </table>
-          {!list.length && <div className="empty">{filter === 'unused' || filter === 'missing' ? 'Nothing here — good job!' : 'No packages match.'}</div>}
+          {!list.length && <div className="empty">{filter === 'unused' || filter === 'missing' || filter === 'license' || filter === 'scripts' ? 'Nothing here — good job!' : 'No packages match.'}</div>}
         </div>
       </div>
       <p className="tiny faint" style={{ marginTop: 12 }}>
+        {hasInstalled && 'Licenses and install scripts are read from node_modules for the declared packages; “License review” lists everything that is not permissive (copyleft, weak copyleft, proprietary or unknown), choosing the looser side of OR. It is a prompt to check, not legal advice. '}
         {plural(external.length, 'package')} imported from source. “Possibly unused” only checks runtime <code>dependencies</code> that no analyzed file imports; tools used via CLI, configs or framework conventions may still need them.
       </p>
     </div>

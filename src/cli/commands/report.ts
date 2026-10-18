@@ -131,6 +131,7 @@ export const reportCommand: Command = {
     try {
       data = await getReport({
         ...options,
+        release: true,
         onServer: (connection) => (liveUrl = connection.url),
         onProgress: (stage, detail) => {
           const count = detail?.total ? pc.dim(` ${detail.done ?? 0}/${detail.total}`) : '';

@@ -20,6 +20,7 @@ import {
   GitFork,
   Globe,
   Hash,
+  KeyRound,
   LayoutDashboard,
   Layers,
   ListOrdered,
@@ -27,6 +28,7 @@ import {
   Package,
   Play,
   Puzzle,
+  Rocket,
   Route,
   Server,
   Settings2,
@@ -62,7 +64,9 @@ export const VIEW_ICONS: Record<ViewId, LucideIcon> = {
   routes: Route,
   flow: Workflow,
   packages: Package,
+  env: KeyRound,
   insights: Activity,
+  release: Rocket,
 };
 
 export const KIND_ICONS: Record<FileKind, LucideIcon> = {

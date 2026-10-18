@@ -13,6 +13,11 @@ export { readState, updateState } from './analyzer/state.js';
 export { loadConfig } from './analyzer/config.js';
 export { compareReports } from './analyzer/compare.js';
 export type { CompareOptions } from './analyzer/compare.js';
+/** Developer tools: `.env.example` generator, release notes with the suggested version, cycle-cutting plans, license risk. */
+export { envExampleText, envStatus } from './shared/env.js';
+export { releaseNotesMarkdown } from './shared/release.js';
+export { planCycleFix } from './shared/cycles.js';
+export { licenseRisk } from './shared/licenses.js';
 export { clearSnapshotCache, configAt, overlayForIndex, overlayForRef, renamesSince, snapshotAt, toSnapshot } from './analyzer/snapshot.js';
 export type { Overlay, SnapshotOptions } from './analyzer/snapshot.js';
 export type { ReadText } from './analyzer/readtext.js';

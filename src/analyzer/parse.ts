@@ -13,9 +13,14 @@ import type {
   SymbolKind,
   TodoItem,
   UrlVisit,
+  EnvRead,
+  RawRisk,
+  TypeEscapes,
 } from '../shared/types.js';
 import { COMPONENT_FILE_RE } from '../shared/source-files.js';
 import { isTestFile } from './classify.js';
+import { addEscapes, emptyEscapes, hasEscapes, scanScript } from './scan.js';
+import { maskSecretsIn } from '../shared/risks.js';
 
 /* -------------------------------------------------------------------------- */
 /*                                   Types                                    */
@@ -143,6 +148,13 @@ export interface ParsedFile {
   urlVisits?: UrlVisit[];
   /** clone-radar: normalized tokens for clone detection (`cloneTokens`), cached with the parse result. */
   tokens?: CloneTokens;
+  // --- dev-tools (src/analyzer/scan.ts): set only when the file has any ---
+  /** Environment variables the code reads. */
+  env?: EnvRead[];
+  /** Risky patterns: secrets, injection, disabled TLS… */
+  risks?: RawRisk[];
+  /** Places where the file switches the type checker or the linter off. */
+  escapes?: TypeEscapes;
 }
 
 export interface ParseOptions {
@@ -240,8 +252,12 @@ const LOGICAL_OPERATORS = new Set<ts.SyntaxKind>([
 const NEST_HTTP_DECORATORS = new Set(['Get', 'Post', 'Put', 'Delete', 'Patch', 'Options', 'Head', 'All']);
 const NEST_GQL_DECORATORS = new Set(['Query', 'Mutation', 'Subscription']);
 
+/**
+ * One line of at most `max` characters. Secrets are masked first, so no snippet in a report (type text, TODOs,
+ * URLs…) carries one, and a cut can never leave half of one behind.
+ */
 export function clip(text: string, max: number): string {
-  const flat = text.replace(/\s+/g, ' ').trim();
+  const flat = maskSecretsIn(text.replace(/\s+/g, ' ').trim());
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }
 
@@ -2642,6 +2658,15 @@ function analyzeScript(text: string, kind: ts.ScriptKind, lineOffset: number, ou
   if (lineOffset) LINE_OFFSETS.set(sf, lineOffset);
   const analyzer = new ScriptAnalyzer(sf, out, lineOffset, { ...opts, componentFramework: framework });
   analyzer.run();
+  collectScan(sf, lineOffset, out);
+}
+
+/** dev-tools: add what one script block holds (env reads, risky patterns, type escapes) to the parse result. */
+function collectScan(sf: ts.SourceFile, lineOffset: number, out: ParsedFile): void {
+  const scan = scanScript(sf, lineOffset);
+  if (scan.env.length) out.env = [...(out.env ?? []), ...scan.env];
+  if (scan.risks.length) out.risks = [...(out.risks ?? []), ...scan.risks];
+  if (hasEscapes(scan.escapes)) addEscapes((out.escapes ??= emptyEscapes()), scan.escapes);
 }
 
 function finalize(out: ParsedFile, text: string): ParsedFile {

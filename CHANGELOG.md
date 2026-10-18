@@ -11,8 +11,8 @@ The daily-companion release. code-visualizer now answers questions in the termin
 Grouped as in `code-visualizer --help`; `cviz` is a short alias of `code-visualizer`.
 
 - **Ask**: `who`, `uses` (alias `refs`), `impact`, `path`, `route`, `tests-for` and `similar` — all with `--json`, fuzzy targets with “did you mean” and exit codes 0 / 1 not found / 2 usage.
-- **Everyday**: `test` (run exactly the affected tests), `coverage` (patch coverage), `status` (shell prompt, tmux and agent status lines) and `sync` (what the base branch and teammates bring before a rebase).
-- **Review & CI**: `diff [base] [head]` (architecture changes between refs, your branch or staged work, `--fail-on …`) and `review [ref|#123|!45]` (review any branch, PR or MR in dependency order without checking it out).
+- **Everyday**: `test` (run exactly the affected tests), `coverage` (patch coverage), `status` (shell prompt, tmux and agent status lines), `sync` (what the base branch and teammates bring before a rebase) and `env` (environment variables the code reads vs. your `.env` files, `--example` writes a `.env.example`, `--check` for CI).
+- **Review & CI**: `diff [base] [head]` (architecture changes between refs, your branch or staged work, `--fail-on …`), `review [ref|#123|!45]` (review any branch, PR or MR in dependency order without checking it out) and `release [--since <ref>] [--notes] [--check]` (commits and published-API changes since the last tag, the version that fits, release notes).
 - **AI agents**: `mcp` (MCP server over stdio, `--print-config claude|cursor|vscode|codex|gemini`), `agents init|doctor|remove` and `hook <session-start|pre-edit|post-edit|stop>`.
 - **Setup**: `cache [status|clear]` and `hooks install|uninstall|status`.
 - `context --agents [--write] [--claude]` maintains a managed project-map block in AGENTS.md; `pr` gains `--format comment`, `--check` and `--coverage`; `serve` gains `--notify` and `--new`; analysis commands gain `--no-cache` and `--coverage <path>`.
@@ -64,6 +64,15 @@ Grouped as in `code-visualizer --help`; `cviz` is a short alias of `code-visuali
 
 - A normalized token index of every declaration finds copy-paste clones, including renamed copies and copies with a small edit; boilerplate fingerprints are skipped. Clone families are ranked by how often their files change together.
 - A **Duplication** health category (10% of the score), **clone drift** (“you changed a.ts:40-58; its clone b.ts:12-30 was not changed”), “import it instead” messages for new copies in `pr`, `diff`, `review`, `serve` and the agent hooks, and a no-new-duplication gate. Edits next to an existing copy never produce a new clone.
+
+### Environment, security & releases
+
+- **Environment** view and `env` command: every read of `process.env`, `import.meta.env`, `Deno.env.get` and `Bun.env` with its file and line, matched with the names in your dotenv files (values are never read; tests, stories, fixtures and examples are left out). Variables that no template (`.env.example`, `.env.sample`, a git-tracked dotenv file…) documents, variables declared but never read, and secrets that reach the browser through a public prefix (`VITE_`, `NEXT_PUBLIC_`…) are flagged; variables with a fallback and platform ones (`NODE_ENV`, `CI`…) are not asked for. A `.env.example` can be copied or written from the code.
+- **Security findings** in Health & insights: hardcoded secrets with a recognisable shape, literal passwords and tokens, dynamic `eval` / `new Function` / string timers, unsafe HTML sinks, shell and SQL built from variables and disabled TLS checks, each with advice; findings in tests come last. Secrets are masked everywhere in the report, including symbol signatures and TODO notes. **Type-safety escapes** count `any`, `!`, `@ts-ignore`, `@ts-expect-error` and `eslint-disable` per file.
+- **Release** view and `release` command: the commits since the last version tag (read as Conventional Commits), the changes to the API that `package.json` publishes, the semver bump that fits both (a `fix:` that removes an export still asks for a major), readiness checks (clean tree, up to date, no new cycles or rule violations, health) and copyable release notes. It is planned in `report` and `serve`, and only when asked in the other commands, so `check`, `status` and the MCP server stay as fast as before.
+- **How to break it** under every circular dependency: the few imports to cut, cheapest first, as `import type`, move to a shared module, invert or extract.
+- **Packages** shows the license and the install scripts of each direct dependency, with a *License review* list for copyleft, weak copyleft, proprietary and unknown licenses.
+- New exports: `envExampleText`, `envStatus`, `releaseNotesMarkdown`, `planCycleFix` and `licenseRisk`; the data is `data.env`, `data.release`, `data.insights.risks`, `data.packages[].licenseRisk` and `data.files[].escapes`.
 
 ### Status line, git hooks & sync
 

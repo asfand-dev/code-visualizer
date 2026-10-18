@@ -1,5 +1,5 @@
 import { useMemo, useState, type ReactNode } from 'react';
-import { Ban, ClipboardPaste, Copy, Flame, Ghost, GitCompareArrows, Globe2, HeartPulse, ListTodo, Network, Recycle, Ruler, ShieldAlert, Sigma, TestTube2, Unlink, UserX, Wand2 } from 'lucide-react';
+import { Ban, Braces, ClipboardPaste, Copy, Flame, Ghost, GitCompareArrows, Globe2, HeartPulse, ListTodo, Lock, Network, Recycle, Ruler, ShieldAlert, Sigma, TestTube2, Unlink, UserX, Wand2 } from 'lucide-react';
 import { Avatar, ScoreRing, scoreColor, TrendChart } from '../components/companion';
 import { setState } from '../state/store';
 import { useModel } from '../data/context';
@@ -11,6 +11,8 @@ import type { FileInfo } from '../types';
 import { KindDot, Segmented, Toggle } from '../components/ui';
 import { newInsightsOf } from '../../../src/shared/new-findings';
 import { CloneFamilyItem } from '../components/Clones';
+import { CycleFix } from '../components/CycleFix';
+import { hasTypeEscapes, SecurityFindings, TypeEscapesTable } from '../components/SecurityCards';
 
 function Card({ id, icon: Icon, title, count, hint, children, right, tone }: { id: string; icon: typeof Flame; title: string; count?: number; hint?: string; children: ReactNode; right?: ReactNode; tone?: string }) {
   return (
@@ -129,6 +131,9 @@ export function InsightsView() {
   }, [model]);
   const unmatchedCalls = model.data.apiCalls.filter((c) => !c.route && !c.external);
   const violations = insights.ruleViolations;
+  // --- dev-tools: security findings and type-safety escapes (they do not depend on what changed) ---
+  const risks = allInsights.risks ?? [];
+  const escapesOn = hasTypeEscapes(files);
   // --- clone-radar: copy-paste clones (with "New only": the ones your changes added) ---
   const clones = showNew ? (delta?.newClones ?? []) : (allInsights.clones ?? []);
   const clonesOn = !!allInsights.clones;
@@ -137,7 +142,9 @@ export function InsightsView() {
     { id: 'health', label: `Health ${health.score}`, icon: HeartPulse },
     { id: 'hotspots', label: hasGit ? 'Hotspots' : 'Risky core', icon: Flame },
     { id: 'cycles', label: `Cycles (${insights.cycles.length})`, icon: Recycle },
+    ...(risks.length ? [{ id: 'security', label: `Security (${risks.length})`, icon: Lock }] : []),
     { id: 'complex', label: 'Complex functions', icon: Sigma },
+    ...(escapesOn ? [{ id: 'escapes', label: 'Type safety', icon: Braces }] : []),
     { id: 'unused', label: `Unused exports (${unusedExports.length})`, icon: Unlink },
     { id: 'orphans', label: `Orphans (${insights.orphans.length})`, icon: Ghost },
     { id: 'size', label: 'Large files', icon: Ruler },
@@ -287,9 +294,22 @@ export function InsightsView() {
                   <Network size={13} /> Graph
                 </button>
               </div>
+              <CycleFix cycle={cycle} />
             </div>
           ))}
         </Card>
+
+        {risks.length > 0 && (
+          <Card id="security" icon={Lock} title="Security findings" count={risks.length} tone="danger" hint="Hardcoded secrets, code built from variables (eval, shell, SQL, HTML) and disabled TLS checks.">
+            <SecurityFindings risks={risks} omitted={allInsights.risksOmitted} />
+          </Card>
+        )}
+
+        {escapesOn && (
+          <Card id="escapes" icon={Braces} title="Type-safety escapes" tone="warn" hint="Every `any`, `!`, @ts-ignore and eslint-disable is a place the tools stopped checking.">
+            <TypeEscapesTable files={files} />
+          </Card>
+        )}
 
         <Card id="complex" icon={Sigma} title="Most complex functions" count={insights.complexFunctions.length} tone="warn" hint="Cyclomatic complexity: 1–10 simple, 11–20 moderate, 21+ hard to test and change.">
           {!insights.complexFunctions.length && <None>{showNew ? noneNew(allInsights.complexFunctions.length, 'functions') : 'No complex functions.'}</None>}

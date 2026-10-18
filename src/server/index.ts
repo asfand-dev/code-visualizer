@@ -120,8 +120,8 @@ export async function serve(options: ServeOptions): Promise<LiveServer> {
   const notesFile = path.join(root, '.code-visualizer', 'notes.json');
   const { port: _port, host: _host, writeHistory: _history, log: _log, register: _register, onEvents: _onEvents, excludeEvents, ...rest } = options;
   // compare: `changes.delta` on every update; the base snapshot is computed once per base commit
-  // (memoized), later runs only diff.
-  const analysis = { ...rest, compare: rest.compare ?? true };
+  // (memoized), later runs only diff. release: the same for the last version tag (the Release view).
+  const analysis = { ...rest, compare: rest.compare ?? true, release: rest.release ?? true };
 
   // The engine owns the cache, the watchers and the coalescing re-analysis queue.
   // events: the live guard compares every analysis with the previous one (a few ms).

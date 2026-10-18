@@ -16,9 +16,11 @@ export type ViewId =
   | 'routes'
   | 'flow'
   | 'packages'
-  | 'insights';
+  | 'env'
+  | 'insights'
+  | 'release';
 
-export const VIEW_IDS: ViewId[] = ['today', 'changes', 'search', 'activity', 'overview', 'tour', 'graph', 'architecture', 'structure', 'components', 'classes', 'routes', 'flow', 'packages', 'insights'];
+export const VIEW_IDS: ViewId[] = ['today', 'changes', 'search', 'activity', 'overview', 'tour', 'graph', 'architecture', 'structure', 'components', 'classes', 'routes', 'flow', 'packages', 'env', 'insights', 'release'];
 
 export type SelectionType = 'file' | 'symbol' | 'folder' | 'package' | 'route';
 

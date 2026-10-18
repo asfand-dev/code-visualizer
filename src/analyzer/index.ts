@@ -5,12 +5,14 @@ import type {
   ChangeSet,
   CoverageSummary,
   DependencyEdge,
+  EnvReport,
   HistoryPoint,
   EdgeKind,
   FileInfo,
   Language,
   PackageInfo,
   ReportData,
+  RiskFinding,
   RouteInfo,
   RuleListEntry,
   Scope,
@@ -23,6 +25,8 @@ import type {
 import { SCHEMA_VERSION } from '../shared/types.js';
 import type { TestRunners } from '../shared/testcmd.js';
 import { meaningfulLines, setReadingOrder } from '../shared/review.js';
+import { buildEnvReport } from '../shared/env.js';
+import { isTestContext, MAX_RISKS, sortFindings, toFindings } from '../shared/risks.js';
 import crypto from 'node:crypto';
 import { linkApiCalls } from './apimap.js';
 import { buildChangeSet, codeLinesFor, type CodeChange } from './changes.js';
@@ -31,6 +35,8 @@ import { isSignificant } from '../shared/clones.js';
 import { coverageSummary, fileCoverage, isPartialRun, loadCoverage, patchCoverage, unmeasuredPackages, type LoadedCoverage } from './coverage.js';
 import { classifyFile, isConfigFile, isTestFile } from './classify.js';
 import { evaluateRules, loadConfig, type LoadedConfig, type RuleConfig } from './config.js';
+import { readEnvFiles } from './env.js';
+import { readInstalled } from './licenses.js';
 import { AnalyzeError } from './errors.js';
 import { discoverFiles, discoveryFilter, extOf, MAX_FILE_BYTES, type DiscoveredFile } from './files.js';
 import { analyzeChanges, analyzeGit, git as runGit, type GitAnalysis } from './git.js';
@@ -132,6 +138,13 @@ export interface AnalyzeOptions {
    * Default: detect, unless the configuration turns it off (`"clones": false`).
    */
   clones?: boolean;
+  /**
+   * dev-tools: work out what the next release contains (commits since the last version tag, changes to
+   * the published API, the version that fits) as `release`. It analyzes the tag like any other ref
+   * (cached per commit), so only `serve`, `report` and `release` ask for it. `since` starts from that tag or
+   * commit instead of the latest version tag.
+   */
+  release?: boolean | { since?: string };
   onProgress?: (stage: AnalyzeStage, detail?: { done?: number; total?: number }) => void;
 }
 
@@ -1160,6 +1173,8 @@ export async function analyze(options: AnalyzeOptions = {}): Promise<ReportData>
       },
       parseError: p.parseError,
     };
+    // dev-tools: `any` in a declaration file or generated code says nothing about the project's own habits.
+    if (p.escapes && !st.id.endsWith('.d.ts') && !p.isGenerated) info.escapes = p.escapes;
     // test-intelligence: e2e specs reach routes by URL, not by import.
     if (kind === 'test' && p.urlVisits?.length) info.urlVisits = p.urlVisits;
     const orphanCandidate =
@@ -1224,6 +1239,19 @@ export async function analyze(options: AnalyzeOptions = {}): Promise<ReportData>
     }
     const d = manifests.find((m) => m.dir === dirs[0])?.declared.get(name);
     packages.push({ name, version: d?.version, declaredAs: d?.declaredAs, builtin: false, importedBy: [], names: [], importCount: 0, typeOnly: false, unused: true, unusedIn: dirs });
+  }
+  // dev-tools: what is installed for the declared packages (version, license, install scripts); not for snapshots.
+  if (!overlay) {
+    const declaredNames = packages.filter((p) => p.declaredAs && !p.builtin).map((p) => p.name);
+    const installed = readInstalled(root, ctx.workspaces.map((w) => w.dir), declaredNames);
+    for (const p of packages) {
+      const info = installed.get(p.name);
+      if (!info) continue;
+      p.installed = info.version;
+      p.license = info.license;
+      p.licenseRisk = info.licenseRisk;
+      if (info.installScripts) p.installScripts = info.installScripts;
+    }
   }
 
   /* --------------------------- Complex functions ----------------------------- */
@@ -1554,6 +1582,28 @@ export async function analyze(options: AnalyzeOptions = {}): Promise<ReportData>
     rememberDeclarations(insights.clones, clones.declarations);
   }
   if (!roleOf && health.unusedDeclarations.length) insights.unusedDeclarations = health.unusedDeclarations;
+  // --- dev-tools: risky patterns in the project's own code, most severe first ---
+  // Tests, stories, fixtures and examples set things up for themselves: their credentials and env reads are not the project's.
+  const inTestContext = (f: FileInfo): boolean => f.isTest || f.kind === 'story' || isTestContext(f.id);
+  const findings: RiskFinding[] = [];
+  for (const f of coreFiles) {
+    const raw = states.get(f.id)?.parsed.risks;
+    if (raw?.length && !f.isGenerated) findings.push(...toFindings(f.id, raw, inTestContext(f)));
+  }
+  if (findings.length) {
+    insights.risks = sortFindings(findings).slice(0, MAX_RISKS);
+    if (findings.length > MAX_RISKS) insights.risksOmitted = findings.length - MAX_RISKS;
+  }
+  // --- dev-tools: environment variables; a scoped report or a snapshot says nothing about the whole project ---
+  let env: EnvReport | undefined;
+  if (!roleOf && !overlay) {
+    const reads = coreFiles.flatMap((f) => {
+      const list = states.get(f.id)?.parsed.env;
+      return list?.length && !inTestContext(f) ? [{ file: f.id, reads: list }] : [];
+    });
+    const envFiles = await readEnvFiles(root, ctx.workspaces.map((w) => w.dir), options.git !== false);
+    if (reads.length || envFiles.length) env = buildEnvReport(reads, envFiles);
+  }
 
   /* --------------------------------- Stats ----------------------------------- */
   const languages = new Map<Language, { files: number; loc: number }>();
@@ -1697,6 +1747,7 @@ export async function analyze(options: AnalyzeOptions = {}): Promise<ReportData>
     warnings,
   };
   if (coverageInfo) partial.coverage = coverageInfo;
+  if (env) partial.env = env;
   /**
    * clone-radar: the head as the delta sees it — judged with the base's boilerplate fingerprints, so a copy
    * that tips a fingerprint over the limit does not hide itself (nor does one that drops below it turn old
@@ -1752,6 +1803,24 @@ export async function analyze(options: AnalyzeOptions = {}): Promise<ReportData>
       }
     } catch (error) {
       warnings.push(`Could not compare with ${baseName}: ${(error as Error).message}`);
+    }
+  }
+
+  // dev-tools: what the next release contains and which version number fits (commits and API since the last tag).
+  if (options.release && git && scope.type === 'project' && !overlay) {
+    try {
+      const [{ takeSnapshot }, { buildReleasePlan }] = await Promise.all([import('./overlay.js'), import('./release.js')]);
+      partial.release = await buildReleasePlan(root, {
+        head: partial,
+        snapshot: (ref) => takeSnapshot(analyze, root, ref, { cache, exclude: options.exclude, maxFiles: options.maxFiles, toolVersion: options.toolVersion, persist: options.persist !== false }),
+        config,
+        since: typeof options.release === 'object' ? options.release.since : undefined,
+        packageVersion: ctx.pkg.version,
+        remote: git.info.remote,
+        behind: git.summary.upstream?.behind,
+      });
+    } catch (error) {
+      warnings.push(`Could not plan the release: ${(error as Error).message}`);
     }
   }
 

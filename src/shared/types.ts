@@ -1720,3 +1720,194 @@ export interface StatusSnapshot {
   /** The coverage report is older than files it describes (rerun the tests with coverage). */
   coverageStale?: boolean;
 }
+
+// --- dev-tools: environment variables, security and type-safety scan, release plan, licenses ---
+
+/** How a variable is read: `process.env.X`, `import.meta.env.X`, `Deno.env.get('X')`, `Bun.env.X`. */
+export type EnvAccess = 'process.env' | 'import.meta.env' | 'Deno.env' | 'Bun.env';
+
+/** One read of an environment variable in a file (`ParsedFile.env`). */
+export interface EnvRead {
+  name: string;
+  line: number;
+  access: EnvAccess;
+  /** The read has a default (`process.env.X || 'a'`, `?? 'a'`, `const { X = 'a' } = process.env`). */
+  fallback?: boolean;
+}
+
+/** Where a variable is read, and how. */
+export interface EnvUse {
+  file: string;
+  line: number;
+  access: EnvAccess;
+  fallback?: boolean;
+}
+
+/** An environment variable the code reads, or a template declares. Only names are kept, never values. */
+export interface EnvVar {
+  name: string;
+  /** Reads in the code (capped; see `useCount`). */
+  uses: EnvUse[];
+  useCount: number;
+  fileCount: number;
+  /** The `.env*` files that declare it (project-relative). */
+  declaredIn: string[];
+  /** A committed template (`.env.example`, `.env.sample`…) declares it. */
+  documented: boolean;
+  /** Some read has no default: the code needs the variable. */
+  required: boolean;
+  /** Provided by the runtime or the platform (`NODE_ENV`, `CI`, `GITHUB_*`…): nothing to document. */
+  platform?: boolean;
+  /** Reaches the browser bundle (a framework's public prefix, or read through `import.meta.env`). */
+  exposed?: boolean;
+  /** The name looks like a secret (`*_SECRET`, `*_TOKEN`, `*_PASSWORD`…). */
+  secretLike?: boolean;
+}
+
+/** A dotenv file (`.env`, `.env.example`…): its variable names. */
+export interface EnvFile {
+  path: string;
+  /** A committed template (`.env.example`, `.env.sample`, `.env.template`, `.env.defaults`). */
+  template: boolean;
+  names: string[];
+}
+
+export interface EnvReport {
+  /** Variables read by code first (most used first), then declared-only ones. */
+  vars: EnvVar[];
+  files: EnvFile[];
+  /** Read without a default, and declared by no template (what a new teammate has to guess). */
+  undocumented: string[];
+  /** Declared by a template and never read by the code. */
+  unused: string[];
+  /** Exposed to the browser and named like a secret. */
+  exposedSecrets: string[];
+}
+
+export interface ReportData {
+  /** Environment variables the code reads and the dotenv files that declare them. */
+  env?: EnvReport;
+}
+
+export type RiskRule = 'hardcoded-secret' | 'hardcoded-credential' | 'eval' | 'html-injection' | 'shell-injection' | 'sql-injection' | 'tls-disabled';
+
+export type RiskSeverity = 'high' | 'medium' | 'low';
+
+/** A risky pattern as the parser found it (`ParsedFile.risks`). */
+export interface RawRisk {
+  rule: RiskRule;
+  line: number;
+  /** The line of code with secrets masked. */
+  snippet: string;
+  /** Rule-specific detail, e.g. which kind of secret. */
+  detail?: string;
+}
+
+export interface RiskFinding extends RawRisk {
+  severity: RiskSeverity;
+  file: string;
+  /** In a test, fixture, mock or example: usually harmless, so the UI hides it by default. */
+  test?: boolean;
+}
+
+/** Ways a file switches the type checker or the linter off. */
+export interface TypeEscapes {
+  /** Explicit `any` (`: any`, `as any`, `<any>`, `any[]`). */
+  any: number;
+  /** Non-null assertions (`value!`). */
+  nonNull: number;
+  /** `@ts-ignore` and `@ts-nocheck`. */
+  tsIgnore: number;
+  /** `@ts-expect-error`. */
+  tsExpectError: number;
+  /** `eslint-disable` comments. */
+  lintDisable: number;
+}
+
+export interface FileInfo {
+  /** Set when the file has at least one escape hatch. */
+  escapes?: TypeEscapes;
+}
+
+export interface Insights {
+  /** Risky patterns (secrets, injection, disabled TLS…), most severe first; capped at MAX_RISKS. */
+  risks?: RiskFinding[];
+  /** How many findings were left out of `risks` by the cap. */
+  risksOmitted?: number;
+}
+
+export type LicenseRisk = 'permissive' | 'weak-copyleft' | 'copyleft' | 'proprietary' | 'unknown';
+
+export interface PackageInfo {
+  /** The version found in node_modules (when installed), which can differ from the declared range. */
+  installed?: string;
+  /** SPDX expression from the installed package.json. */
+  license?: string;
+  licenseRisk?: LicenseRisk;
+  /** `preinstall` / `install` / `postinstall` scripts the package runs when installed. */
+  installScripts?: string[];
+}
+
+export type ReleaseBump = 'major' | 'minor' | 'patch' | 'none';
+
+export type CommitType = 'feat' | 'fix' | 'perf' | 'refactor' | 'docs' | 'test' | 'build' | 'ci' | 'chore' | 'style' | 'revert' | 'other';
+
+/** A commit since the last release, read as a Conventional Commit when it is one. */
+export interface ReleaseCommit {
+  hash: string;
+  author: string;
+  date: number;
+  /** The subject as written. */
+  subject: string;
+  /** The subject without `type(scope):`, `!` and the trailing `(#123)`. */
+  description: string;
+  type: CommitType;
+  scope?: string;
+  /** `type!:` or a `BREAKING CHANGE:` footer. */
+  breaking?: boolean;
+  /** Pull or merge request number from `(#123)`. */
+  pr?: number;
+}
+
+export interface ReleaseCheck {
+  id: string;
+  ok: boolean;
+  label: string;
+  detail?: string;
+}
+
+/** What the next release contains and which version number it deserves. */
+export interface ReleasePlan {
+  /** The latest version tag reachable from HEAD; undefined when the project has none. */
+  tag?: string;
+  tagDate?: number;
+  /** The tag's version without the `v`. */
+  lastVersion?: string;
+  /** `version` in package.json. */
+  packageVersion?: string;
+  /** Commits since the tag, newest first (capped; `commitCount` is the real number). */
+  commits: ReleaseCommit[];
+  commitCount: number;
+  bump: {
+    level: ReleaseBump;
+    /** The next version, when the last one is known. */
+    next?: string;
+    /** From the commit types (breaking, feat, fix). */
+    fromCommits: ReleaseBump;
+    /** From the changes of the published API, when the tag could be analyzed. */
+    fromApi?: ReleaseBump;
+    reasons: string[];
+  };
+  /** Changes to exported declarations since the tag, breaking ones first. */
+  apiChanges: ExportChange[];
+  /** New or fixed problems since the tag (cycles, rule breaks) and the state of the working tree. */
+  checks: ReleaseCheck[];
+  /** `https://github.com/org/repo/compare/v1.2.0...HEAD`-style link when the remote is known. */
+  compareUrl?: string;
+  warnings?: string[];
+}
+
+export interface ReportData {
+  /** What the next release contains (only with the `release` analysis option: `serve` and `report`). */
+  release?: ReleasePlan;
+}

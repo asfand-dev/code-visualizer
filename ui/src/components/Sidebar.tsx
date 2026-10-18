@@ -37,8 +37,10 @@ export function useNavEntries(): NavEntry[] {
   if (model.hasRoutes) entries.push({ id: 'routes', label: 'Routes & APIs', section: 'Code', count: data.routes.length });
   if (model.hasCalls) entries.push({ id: 'flow', label: 'Call flow', section: 'Code' });
   entries.push({ id: 'packages', label: 'Packages', section: 'Code', count: data.packages.filter((p) => !p.builtin && p.importedBy.length).length });
+  if (data.env) entries.push({ id: 'env', label: 'Environment', section: 'Code', count: data.env.vars.filter((v) => v.useCount > 0).length });
   if (model.hasGit) entries.push({ id: 'activity', label: 'Activity & team', section: 'Team & health', count: data.git?.contributors.length });
   entries.push({ id: 'insights', label: 'Health & insights', section: 'Team & health', count: issues || undefined });
+  if (data.release) entries.push({ id: 'release', label: 'Release', section: 'Team & health', count: data.release.commitCount || undefined });
   return entries;
 }
 

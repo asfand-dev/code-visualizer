@@ -17,6 +17,8 @@ import { RoutesView } from './views/RoutesView';
 import { FlowView } from './views/FlowView';
 import { PackagesView } from './views/PackagesView';
 import { InsightsView } from './views/InsightsView';
+import { EnvView } from './views/EnvView';
+import { ReleaseView } from './views/ReleaseView';
 import { TodayView } from './views/TodayView';
 import { ChangesView } from './views/ChangesView';
 import { SearchView } from './views/SearchView';
@@ -38,8 +40,10 @@ const SUBTITLES: Record<ViewId, string> = {
   classes: 'UML class diagram of classes, interfaces and enums',
   routes: 'Pages, API endpoints and their handlers',
   flow: 'Function-level call graph',
-  packages: 'External dependencies and how they are used',
-  insights: 'Health score, trends, hotspots, dead code and risks',
+  packages: 'External dependencies, their licenses and install scripts',
+  env: 'Environment variables the code reads, and what documents them',
+  insights: 'Health score, trends, hotspots, dead code, security and risks',
+  release: 'What the next release contains and the version that fits',
 };
 
 const FILL_VIEWS = new Set<ViewId>(['graph', 'architecture', 'structure', 'components', 'classes', 'routes', 'flow', 'search', 'activity', 'tour']);
@@ -142,7 +146,9 @@ export function App() {
             {activeView === 'routes' && <RoutesView />}
             {activeView === 'flow' && <FlowView />}
             {activeView === 'packages' && <PackagesView />}
+            {activeView === 'env' && <EnvView />}
             {activeView === 'insights' && <InsightsView />}
+            {activeView === 'release' && <ReleaseView />}
           </div>
           {selection && <DetailPanel />}
         </div>

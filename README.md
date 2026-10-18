@@ -26,6 +26,7 @@ npx code-visualizer serve
 - [A day with code-visualizer](#a-day-with-code-visualizer)
 - [In the browser](#in-the-browser)
 - [Terminal answers](#terminal-answers)
+- [Environment, security & releases](#environment-security--releases)
 - [AI agents](#ai-agents)
 - [Tests & coverage](#tests--coverage)
 - [Code review](#code-review)
@@ -179,9 +180,11 @@ The browser shows the same **Live feed**, a toast with a **Show** button and the
 | | **Classes & types** | UML class diagram: members, visibility, decorators, extends / implements / associations. |
 | | **Routes & APIs** | URL map and table for Express, Fastify, Koa, Hono, NestJS, Next.js, Nuxt, SvelteKit, Remix, Astro, React Router, Vue Router and Angular, with full mounted paths, handlers, middleware, **who calls each endpoint**, and a **client calls** tab that maps every `fetch` / axios / `useSWR` / `$fetch` / `HttpClient` request to the route that serves it. |
 | | **Call flow** | Callers and callees of any function or method, including HTTP hops from frontend code to backend handlers. |
-| | **Packages** | Which npm packages are used where; unused and missing dependencies, and devDependencies used in production code. |
+| | **Packages** | Which npm packages are used where; unused and missing dependencies, devDependencies used in production code, and the **license** and **install scripts** of every direct dependency (a *License review* list for anything that is not permissive). |
+| | **Environment** | Every environment variable the code reads (`process.env`, `import.meta.env`, `Deno.env`, `Bun.env`) with each read site, compared with your `.env` files: undocumented ones, ones declared but never read, and secrets that reach the browser bundle. Copy a ready-made `.env.example`. |
 | **Team & health** | **Activity & team** | Commit timeline, calendar heatmap and working-hours chart, people with their areas, a **knowledge map** of who owns what, *who to ask* per area with bus factor, knowledge silos. |
-| | **Health & insights** | A 0–100 **health score** (modularity, complexity, size, dead code, dependencies, tests & coverage, knowledge spread, duplication) with history and the best next steps. Hotspots, cycles, complex functions, unused exports, orphans, large files, change coupling, **copy-paste clones**, duplicate names, TODOs, untested important files, deprecated APIs still in use, architecture rule violations and external services. A **New only** toggle *(live)* shows just what your change introduced. |
+| | **Health & insights** | A 0–100 **health score** (modularity, complexity, size, dead code, dependencies, tests & coverage, knowledge spread, duplication) with history and the best next steps. Hotspots, cycles, complex functions, unused exports, orphans, large files, change coupling, **copy-paste clones**, duplicate names, TODOs, untested important files, deprecated APIs still in use, architecture rule violations and external services. A **New only** toggle *(live)* shows just what your change introduced. Also **Security findings** (hardcoded secrets, dynamic code execution, unsafe HTML, shell and SQL built from variables, disabled TLS checks), **Type-safety escapes** per file (`any`, `!`, `@ts-ignore`, `@ts-expect-error`, `eslint-disable`) and, for every circular dependency, **How to break it**: the few imports to cut, cheapest first, and how (`import type`, move to a shared module, invert, extract). |
+| | **Release** | What shipping now would contain: the commits since the last version tag, the changes to the API your `package.json` publishes, the version number that fits (major / minor / patch, with the reasons), whether you are ready (clean tree, up to date with upstream, no new cycles or rule violations, health) and release notes you can copy. |
 
 And everywhere: **⌘K / Ctrl+K** search across files, symbols, routes, packages and code text · a **detail panel** with metrics (cyclomatic and cognitive complexity), owners & experts, how tests reach the file, line coverage, **Used by** with exact call sites, **Similar code**, history (“why does it look like this?”), git blame *(live)*, diff, outline, source and **Copy for AI** · a red gutter on changed lines no test ran · **pins & notes** that survive across sessions · **open in VS Code / Cursor / Windsurf / WebStorm / Zed** at the exact line (plus IntelliJ IDEA and Sublime Text in live mode) · deep links for every view and selection · dark & light themes · works on phones.
 
@@ -292,6 +295,24 @@ $ cviz impact displayName
 - **`similar`** matches renamed variables, changed literals and the other declaration style (`function` vs arrow). It says which copy to keep: *“Keep slugify (exported · used in 6 files): replace toSlug in … with an import of it”*. Pipe a snippet with `--stdin`.
 - **Exit codes:** 0 answered, 1 nothing matched, 2 usage error.
 - **Editor links:** `CODE_VISUALIZER_EDITOR` = `vscode` (default), `cursor`, `windsurf`, `vscodium`, `zed`, `webstorm`, `idea`, `file`, `none`, or a URL template such as `subl://open?url=file://{file}&line={line}`. `NO_HYPERLINKS=1` prints plain text.
+
+## Environment, security & releases
+
+Three questions that usually mean a grep, a spreadsheet or a guess. The browser answers all of them (**Environment**, **Health & insights**, **Packages** and **Release**); `env` and `release` answer from the terminal too, with `--json` and a `--check` that fails CI.
+
+```bash
+cviz env                                  # every variable the code reads vs. your .env files
+cviz env --missing --example              # a .env.example for the ones nobody documented
+cviz env --check                          # exit 1: an undocumented variable, or a secret in the browser bundle
+cviz release                              # commits + API changes since the last tag, the version that fits
+cviz release --notes --copy               # release notes (Markdown) on the clipboard
+cviz release --since v1.4.0 --check       # from a chosen tag; exit 1 when the project is not ready
+```
+
+- **Environment variables.** Reads of `process.env.X`, `process.env['X']`, destructuring, `import.meta.env.X`, `Deno.env.get('X')` and `Bun.env.X` are matched with the names in your dotenv files. Only **names** are read, never values, and reads in tests, stories, fixtures and examples are left out (they set up their own environment). A variable is *documented* when a template declares it (`.env.example`, `.env.sample`, `.env.template`…) or git tracks the dotenv file; variables with a fallback in the code and ones the platform provides (`NODE_ENV`, `CI`, `GITHUB_*`…) are not asked for. A secret-looking name behind a framework's public prefix (`VITE_`, `NEXT_PUBLIC_`, `REACT_APP_`…) is flagged as reaching the browser.
+- **Security scan.** Hardcoded secrets with a recognisable shape (AWS, GitHub, Slack, Stripe, Google, SendGrid and npm keys, JWTs, private keys, connection strings with a password), literal passwords and tokens, `eval` / `new Function` / string timers with a dynamic argument, `innerHTML` / `outerHTML` / `insertAdjacentHTML` / `dangerouslySetInnerHTML` from a variable, `exec` built from a variable, SQL built by concatenation, and `rejectUnauthorized: false` and `NODE_TLS_REJECT_UNAUTHORIZED=0`. The scan reads JavaScript and TypeScript; Vue and Svelte templates are not scanned. Findings in tests come last. **A secret is never shown in full**: the report holds `AKIA…(20 characters)`, not the key. It is a code smell scanner, not a replacement for a secret scanner on your git history; rotate anything it finds.
+- **Release planner.** Commits since the last version tag are read as [Conventional Commits](https://www.conventionalcommits.org/) (other messages are sorted by their first verb). The suggested version combines them (`feat!` / `BREAKING CHANGE` → major, `feat` → minor, anything else → patch) with the **changes to the API your `package.json` publishes** (`main`, `module`, `exports`, `bin`…), compared with the code at the tag: a commit called `fix:` that removes an export still asks for a major. Versions below 1.0.0 say so, and a pre-release stays a pre-release. Readiness checks: no uncommitted files, not behind upstream, no new cycles or rule violations since the tag, health not lower. The planner reads the tag from git; a project without one gets a hint on how to start.
+- **Cycle plans, licenses and install scripts.** Each cycle lists the imports to cut, cheapest first. The Packages view reads `node_modules` for the **license** (the looser side of an `OR`) and the `preinstall` / `install` / `postinstall` scripts (and native `binding.gyp` builds) of every direct dependency, and puts copyleft, weak-copyleft, proprietary and unknown licenses under *License review*. That is a prompt to check, not legal advice.
 
 ## AI agents
 
@@ -920,10 +941,12 @@ Run from a sub-folder, every command analyzes the project around it: the nearest
 | | `coverage` | Patch coverage of your changes from the local coverage report. |
 | | `status` | One-line status for prompts, tmux and agent status lines. |
 | | `sync` | What the base branch and teammates bring: conflicts and breaks before a rebase. |
+| | `env` | Environment variables: what the code reads, what is undocumented, what leaks to the browser; writes a `.env.example`. |
 | **Review & CI** | `check` | Quality gates: new-only with `--changed` / `--staged`, baseline, SARIF / GitLab / GitHub outputs. |
 | | `pr` | Pull-request description (or a sticky PR comment) for your changes. |
 | | `diff` | Architecture changes between two refs, your branch or staged work. |
 | | `review` | Review any branch or PR in dependency order, without checking it out. |
+| | `release` | What the next release contains: commits, API changes, the version that fits, release notes. |
 | **AI agents** | `mcp` | MCP server (stdio) with the project map for AI agents. |
 | | `agents` | `init`, `doctor`, `remove`: register MCP, guardrail hooks, skill and AGENTS.md. |
 | | `hook` | The guardrail hooks themselves (run by the agent). |
@@ -1038,6 +1061,7 @@ Up to 4,000 commits are read once (cached): churn, authors with recency (`.mailm
 - **Add to tour** on anything you want to explain, then *Guided tour → My tour → Save to .tours/*.
 - In the graph, switch on **My changes** to outline what you changed (solid) and what it affects (dashed).
 - **Copy for AI** in the file panel gives an assistant the file's API, dependencies, dependents, tests, history and source in one paste.
+- Release scripts and CI: `cviz release --quiet` prints only the next version (`npm version $(cviz release --quiet)`), `cviz release --check` fails when the project is not ready, and `cviz env --check` fails on undocumented variables and secrets that reach the browser.
 - Pipe the answers: `cviz tests-for $(git diff --name-only) --json | jq`, `cviz test --list | xargs -r npx vitest run`, `pbpaste | cviz similar --stdin`.
 - Keyboard: <kbd>⌘K</kbd>/<kbd>Ctrl K</kbd> or <kbd>/</kbd> search, <kbd>⇧↵</kbd> in search runs a code-text search, <kbd>1</kbd>–<kbd>9</kbd> switch views, <kbd>Esc</kbd> closes panels, <kbd>j</kbd>/<kbd>k</kbd>/<kbd>v</kbd> in Reviewer mode.
 - Deep links: `report.html#/graph?sel=file:src/app.ts`, `#/search?q=TODO`, `#/activity?tab=ownership`, `#/changes?review=feature/x`; add `?theme=light|dark` to force a theme.
@@ -1054,7 +1078,8 @@ Up to 4,000 commits are read once (cached): churn, authors with recency (`.mailm
 - **Hooks fail open.** Agent hooks and git hooks never block you because of their own errors. `CODE_VISUALIZER_HOOKS=off` and `CODE_VISUALIZER_SKIP=1` turn them off.
 - **No surprise execution.** `agents doctor` only runs code-visualizer itself; other commands that a repository registers under its name are shown but not run unless you pass `--run-registered`. `test` never downloads a runner. Git refs are validated before they reach git, and repository strings printed to your terminal have their control characters made visible.
 - **`.code-visualizer/`** holds `report.html`, `history.json`, `notes.json`, `state.json`, `server.json`, `cache/`, `snapshots/`, `reviews/` and `sessions/`. It contains its own `.gitignore`, so nothing is committed by accident. Tours you save go to `.tours/` and the baseline to `code-visualizer.baseline.json`: commit those on purpose.
-- **Sharing reports.** Reports embed your **source code** and **git author names and emails** by default. Use `--no-source` and `--no-git` before sharing outside your team.
+- **Sharing reports.** Reports embed your **source code** and **git author names and emails** by default. Use `--no-source` and `--no-git` before sharing outside your team. The security scan masks every secret it reports, but `--no-source` is still what keeps a hardcoded key out of the file: without it the embedded source contains the key as written.
+- **Secrets and environment variables.** The environment view and `env` read variable **names** from `.env` files, never their values, and ignore files over 256 KB. The security findings, symbol signatures and TODO notes in a report hold masked secrets only.
 
 ## Programmatic API
 
@@ -1089,6 +1114,7 @@ console.log(`live at ${live.url}`);
 | Area | Exports |
 | --- | --- |
 | Analysis | `analyze`, `AnalyzeError`, `createAnalyzeCache`, `loadConfig`, `getReport`, `connectToServer`, `probeServer`, `createEngine`, `loadDiskCache`, `saveDiskCache`, `clearDiskCache`, `readState`, `updateState` |
+| Developer tools | `envExampleText`, `envStatus`, `releaseNotesMarkdown`, `planCycleFix`, `licenseRisk` (the data itself is `data.env`, `data.release`, `data.insights.risks` and `data.packages[].licenseRisk`; `analyze({ release: true })` plans the release) |
 | Compare | `snapshotAt`, `overlayForRef`, `overlayForIndex`, `renamesSince`, `configAt`, `toSnapshot`, `clearSnapshotCache`, `compareReports`, `breakingExports`, `deltaFailures`, `deltaHighlights`, `isEmptyDelta`, `parseFailOn`, `fingerprint`, `cycleKey`, `violationKey`, `RULE_IDS` |
 | Queries | `query` (`resolveTarget`, `impactOf`, `usesOf`, `whoOf`, `routeFor`, `testsFor`, `importPath`, `transitive`, `callersOf`, `calleesOf`, `httpTestedFiles`, `untestedChanges`, `routeTestReach`, `testEvidence`, …), `buildTestCommand` |
 | Gates & CI | `evaluateGates`, `GATE_PROVIDERS`, `allFindings`, `DELTA_RULE_IDS`, `checkKeyWarnings`, `KNOWN_CHECK_KEYS`, `newInsightsOf`, `readBaseline`, `writeBaseline`, `ratchetBaseline`, `baselineFromFindings`, `parseBaseline`, `serializeBaseline`, `DEFAULT_BASELINE_FILE`, `RULES_CATALOG`, `ruleDescriptor`, `sarifReport`, `gitlabReport`, `githubAnnotations`, `checkSummaryMarkdown`, `prCommentMarkdown`, `PR_COMMENT_MARKER` |
@@ -1232,9 +1258,9 @@ They need a git repository with history; in CI use `fetch-depth: 0`.
 
 - VS Code / JetBrains extension that opens the companion for the current file and shows the live guard inline.
 - A *standup* and *where was I?* view: what you did yesterday, and where you left off on each branch.
-- Dependency review for lockfile changes: new packages, install scripts and licenses.
+- Dependency review for lockfile changes: which packages a change adds, with their install scripts and licenses (the Packages view already shows both for what is installed today).
 - JUnit and reviewdog (rdjsonl) outputs, and an affected-packages matrix for monorepo CI.
-- An architecture-aware changelog with a semver suggestion from API changes.
+- `release` writing the version into `package.json` and the changelog, and a `check` gate for new secrets and env variables.
 - An agent view: what each agent session touched and what it rippled into.
 - Codex hooks in `agents init` once its hook format is stable, and a Claude Code plugin package.
 - tRPC and GraphQL operation linking (client ↔ resolver), WebSocket events.
