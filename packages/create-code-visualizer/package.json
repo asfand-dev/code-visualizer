@@ -1,0 +1,42 @@
+{
+  "name": "create-code-visualizer",
+  "version": "0.1.0",
+  "description": "Run code-visualizer with `npm create code-visualizer` — an interactive map of any JavaScript/TypeScript codebase.",
+  "keywords": [
+    "code-visualizer",
+    "create",
+    "visualization",
+    "dependency-graph",
+    "architecture",
+    "onboarding"
+  ],
+  "homepage": "https://github.com/asfand-ionos/code-visualizer#readme",
+  "bugs": {
+    "url": "https://github.com/asfand-ionos/code-visualizer/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/asfand-ionos/code-visualizer.git",
+    "directory": "packages/create-code-visualizer"
+  },
+  "license": "MIT",
+  "author": "Asfandiyar Khan",
+  "type": "module",
+  "bin": {
+    "create-code-visualizer": "bin/index.js"
+  },
+  "files": [
+    "bin",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "code-visualizer": "^0.1.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
+}

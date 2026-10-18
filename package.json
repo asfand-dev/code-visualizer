@@ -1,0 +1,100 @@
+{
+  "name": "code-visualizer",
+  "version": "0.1.0",
+  "description": "Turn any JavaScript/TypeScript codebase into an interactive map: dependency graphs, component trees, UML class diagrams, routes, treemaps, hotspots and a guided onboarding tour — in one offline HTML report.",
+  "keywords": [
+    "code-visualizer",
+    "visualization",
+    "dependency-graph",
+    "dependencies",
+    "architecture",
+    "codebase",
+    "onboarding",
+    "uml",
+    "class-diagram",
+    "component-tree",
+    "react",
+    "vue",
+    "nextjs",
+    "express",
+    "nodejs",
+    "typescript",
+    "javascript",
+    "static-analysis",
+    "circular-dependencies",
+    "cli"
+  ],
+  "homepage": "https://github.com/asfand-ionos/code-visualizer#readme",
+  "bugs": {
+    "url": "https://github.com/asfand-ionos/code-visualizer/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/asfand-ionos/code-visualizer.git"
+  },
+  "license": "MIT",
+  "author": "Asfandiyar Khan",
+  "type": "module",
+  "bin": {
+    "code-visualizer": "dist/cli.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "npm run build:ui && npm run build:cli",
+    "build:ui": "vite build --config ui/vite.config.ts",
+    "build:cli": "tsup",
+    "dev": "node scripts/dev-data.mjs && vite --config ui/vite.config.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p ui/tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "report": "node dist/cli.js report",
+    "prepublishOnly": "npm run typecheck && npm run build && npm test"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "dependencies": {
+    "ignore": "^7.0.12",
+    "open": "^11.0.4",
+    "picocolors": "^1.1.1",
+    "tinyglobby": "^0.2.17",
+    "typescript": "~5.9.3"
+  },
+  "devDependencies": {
+    "@dagrejs/dagre": "^3.1.1",
+    "@types/d3": "^7.4.3",
+    "@types/node": "^26.6.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "cytoscape": "^3.34.4",
+    "cytoscape-dagre": "^4.0.1",
+    "cytoscape-fcose": "^2.2.0",
+    "d3": "^7.9.0",
+    "lucide-react": "^1.58.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "tsup": "^8.5.1",
+    "tsx": "^4.23.15",
+    "vite": "^8.3.4",
+    "vite-plugin-singlefile": "^2.3.3",
+    "vitest": "^5.0.5"
+  }
+}

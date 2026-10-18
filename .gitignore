@@ -1,0 +1,8 @@
+node_modules/
+dist/
+coverage/
+.code-visualizer/
+ui/dev-data.json
+*.log
+.DS_Store
+*.tgz
