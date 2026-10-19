@@ -27,6 +27,7 @@ import { navigate, select, selectFile, setState, showInGraph, useStore } from '.
 import { Avatar, CopyMarkdownButton, PlusMinus, riskColor, ScoreRing, StatusBadge, TrendChart } from '../components/companion';
 import { LiveFeedCard } from '../components/LiveFeed';
 import { IncomingCard } from '../components/IncomingCard';
+import { RepoRadarCard } from '../components/RepoAttention';
 import { liveConfig } from '../data/live';
 import { KindDot } from '../components/ui';
 
@@ -302,6 +303,14 @@ export function TodayView() {
         </div>
       )}
       {/* --- /daily-loop --- */}
+
+      {/* --- dev-companion: branches to clean up, lost commits, risky files --- */}
+      {data.repo && (
+        <div style={{ marginTop: 16 }}>
+          <RepoRadarCard repo={data.repo} />
+        </div>
+      )}
+      {/* --- /dev-companion --- */}
 
       <div className="grid even" style={{ marginTop: 16 }}>
         {/* --------------------------- Since last visit -------------------------- */}

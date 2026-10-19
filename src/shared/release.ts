@@ -28,6 +28,12 @@ function typeFromVerb(subject: string): CommitType {
 
 const BREAKING_FOOTER_RE = /^BREAKING[ -]CHANGES?:/m;
 
+/** The subject follows Conventional Commits with a type this module knows (`feat(cart): add currency`). */
+export function isConventional(subject: string): boolean {
+  const match = CONVENTIONAL_RE.exec(subject.replace(PR_SUFFIX_RE, '').trim());
+  return !!match && Object.hasOwn(TYPE_ALIASES, match[1].toLowerCase());
+}
+
 /** `feat(cart)!: add currency (#12)` → type, scope, breaking, description and pull request number. */
 export function parseCommit(subject: string, body = ''): Pick<ReleaseCommit, 'type' | 'scope' | 'breaking' | 'description' | 'pr'> {
   let text = subject.trim();

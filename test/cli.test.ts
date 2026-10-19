@@ -69,7 +69,7 @@ describe('cli: help and version', () => {
   it('prints the main help with every command, grouped, within 80 columns', async () => {
     const { code, stdout } = await cli('--help');
     expect(code).toBe(0);
-    for (const name of ['report', 'serve', 'check', 'pr', 'diff', 'review', 'context', 'who', 'uses', 'impact', 'path', 'route', 'tests-for', 'mcp', 'cache', 'test', 'coverage', 'status', 'hooks', 'sync', 'similar', 'env', 'release', 'agents', 'hook']) expect(stdout).toMatch(new RegExp(`^\\s+${name}\\s`, 'm'));
+    for (const name of ['report', 'serve', 'check', 'pr', 'diff', 'review', 'context', 'who', 'uses', 'impact', 'path', 'route', 'tests-for', 'mcp', 'cache', 'test', 'coverage', 'status', 'hooks', 'sync', 'similar', 'env', 'release', 'actions', 'agents', 'hook']) expect(stdout).toMatch(new RegExp(`^\\s+${name}\\s`, 'm'));
     // Every registered command is listed (none is hidden today), under its group's heading.
     for (const c of COMMANDS.filter((d) => !d.hidden)) expect(stdout).toMatch(new RegExp(`^  ${c.name} +\\S`, 'm'));
     for (const group of ['Get started', 'Explore', 'Ask', 'Everyday', 'Review & CI', 'AI agents', 'Setup']) expect(stdout).toMatch(new RegExp(`^${group.replace('&', '\\&')}$`, 'm'));
@@ -90,7 +90,7 @@ describe('cli: help and version', () => {
     }
   });
 
-  it.each(['report', 'serve', 'check', 'pr', 'diff', 'review', 'context', 'who', 'uses', 'impact', 'path', 'route', 'tests-for', 'mcp', 'cache', 'test', 'coverage', 'status', 'hooks', 'sync', 'similar', 'env', 'release', 'agents', 'hook'])('"%s --help" exits 0 with usage', async (name) => {
+  it.each(['report', 'serve', 'check', 'pr', 'diff', 'review', 'context', 'who', 'uses', 'impact', 'path', 'route', 'tests-for', 'mcp', 'cache', 'test', 'coverage', 'status', 'hooks', 'sync', 'similar', 'env', 'release', 'actions', 'agents', 'hook'])('"%s --help" exits 0 with usage', async (name) => {
     const { code, stdout, stderr } = await cli(name, '--help');
     expect(code).toBe(0);
     expect(stdout).toContain(`$ code-visualizer ${name}`);

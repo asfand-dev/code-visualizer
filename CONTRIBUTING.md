@@ -67,6 +67,9 @@ src/
     disk-cache.ts      The signed parse / git cache in .code-visualizer/cache
     state.ts           .code-visualizer/state.json sections, server.json, atomic writes
     errors.ts          AnalyzeError
+    repo.ts            Git insights: branches, stashes, worktrees, lost commits, hygiene, settings (`data.repo`)
+    workflows.ts       GitHub Actions: reads .github/ and builds `data.ci` (rules live in shared/workflows.ts)
+    ai.ts              Claude Code tools: skills, commands, agents, MCP, hooks, plugins (`data.ai`)
     index.ts           analyze(): orchestrates everything and produces ReportData
   server/              The live companion (`serve`)
     engine.ts          The warm engine: cache, re-analysis queue, listeners, whatIf
@@ -75,6 +78,7 @@ src/
     index.ts           HTTP + SSE, endpoints, token, editor launch
     daily-loop.ts      GET /api/status and /api/sync
     review.ts          GET /api/review, /api/review-state, /api/review-refs
+    git-tools.ts       /api/git/*: history search, commit details, standup, delete merged branches
   mcp/                 The MCP server (`mcp`)
     protocol.ts        JSON-RPC, tool/resource/prompt shapes, argument validation, output budgets
     server.ts          The stdio server (sessions, stateless requests, progress, cancellation)
@@ -116,6 +120,9 @@ src/
     live.ts            Live event kinds and severity
     route-match.ts · testcmd.ts · coverage.ts · signature.ts · architecture.ts · scc.ts
     source-files.ts · terminal-safe.ts   Import-free helpers for hot paths
+    git-insights.ts · git-commit.ts · git-recipes.ts   Git: branch and hygiene rules, commit lint and standup, the recipe catalog
+    workflows.ts · workflow-forecast.ts · yaml.ts · cron.ts · package-scripts.ts   Workflow parsing and rules, job graph and run forecast, the small YAML reader
+    ai.ts · ai-guide.ts   Claude Code items, readiness checks, the usage guide and templates
   index.ts             The public API
 ui/                    The UI (React + Vite), built into ONE html file
   src/views/           One component per view (TodayView, ChangesView, GraphView, InsightsView, …)

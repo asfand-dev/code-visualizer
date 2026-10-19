@@ -71,6 +71,8 @@ ${pc.bold('Report options')}
                            (default: <root>/.code-visualizer/report.html)
       --json               Also write the raw analysis as JSON next to the report
       --no-open            Don't open the report in the browser
+      --no-personal-ai     The AI tools view lists only the project's own Claude Code tools,
+                           not those of ~/.claude (your skills, MCP servers, plugins)
   -h, --help               Show this help
 
 ${pc.bold('Examples')}
@@ -93,6 +95,7 @@ export const reportCommand: Command = {
         json: { type: 'boolean' },
         open: { type: 'boolean' },
         'no-open': { type: 'boolean' },
+        'no-personal-ai': { type: 'boolean' },
         coverage: { type: 'string', multiple: true },
       });
     } catch (error) {
@@ -132,6 +135,9 @@ export const reportCommand: Command = {
       data = await getReport({
         ...options,
         release: true,
+        repo: true,
+        ci: true,
+        ai: values['no-personal-ai'] ? { personal: false } : true,
         onServer: (connection) => (liveUrl = connection.url),
         onProgress: (stage, detail) => {
           const count = detail?.total ? pc.dim(` ${detail.done ?? 0}/${detail.total}`) : '';

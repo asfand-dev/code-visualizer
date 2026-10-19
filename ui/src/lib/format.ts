@@ -33,6 +33,18 @@ export function timeAgo(ts: number | undefined): string {
   return `${years} ${years === 1 ? 'year' : 'years'} ago`;
 }
 
+/** "in 5 min", "in 3 h", "in 2 days" for a time in the future (`now` when it is already past). */
+export function timeUntil(ts: number | undefined): string {
+  if (!ts) return '–';
+  const diff = ts - Date.now();
+  const day = 86_400_000;
+  if (diff <= 0) return 'now';
+  if (diff < 3_600_000) return `in ${Math.max(1, Math.round(diff / 60_000))} min`;
+  if (diff < day) return `in ${Math.round(diff / 3_600_000)} h`;
+  const days = Math.round(diff / day);
+  return `in ${days} ${days === 1 ? 'day' : 'days'}`;
+}
+
 export function fmtDate(ts: number | string | undefined): string {
   if (!ts) return '–';
   return new Date(ts).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });

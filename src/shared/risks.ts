@@ -54,6 +54,9 @@ export const SEVERITY_ORDER: Record<RiskSeverity, number> = { high: 0, medium: 1
 /** At most this many findings are kept in a report. */
 export const MAX_RISKS = 300;
 
+/** The label of database URLs with a password in them (callers treat a local one differently). */
+export const CONNECTION_STRING_LABEL = 'connection string with a password';
+
 /** Credentials with a recognisable shape. The first capture group (or the whole match) is the secret. */
 export const SECRET_PATTERNS: { label: string; re: RegExp }[] = [
   { label: 'AWS access key', re: /\b((?:AKIA|ASIA)[0-9A-Z]{16})\b/ },
@@ -66,7 +69,7 @@ export const SECRET_PATTERNS: { label: string; re: RegExp }[] = [
   // The whole block, so masking a snippet hides the key material that follows the header too.
   { label: 'private key', re: /(-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----(?:[\s\S]*?-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|[\s\S]*))/ },
   { label: 'JSON Web Token', re: /\b(eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})\b/ },
-  { label: 'connection string with a password', re: /\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|rediss|amqps?):\/\/[^\s:/@'"`]+:([^\s@/'"`]{3,})@/ },
+  { label: CONNECTION_STRING_LABEL, re: /\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|rediss|amqps?):\/\/[^\s:/@'"`]+:([^\s@/'"`]{3,})@/ },
 ];
 
 /** Names whose value is a secret when it is a literal (`password`, `dbPassword`, `API_KEY`, `jwtSecret`…). */

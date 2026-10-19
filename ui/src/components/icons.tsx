@@ -7,8 +7,10 @@ import {
   AlertTriangle,
   Atom,
   BookOpen,
+  Bot,
   Boxes,
   Braces,
+  CirclePlay,
   Component,
   Database,
   FileCode2,
@@ -17,6 +19,7 @@ import {
   Folder,
   FolderTree,
   Gauge,
+  GitBranch,
   GitFork,
   Globe,
   Hash,
@@ -36,6 +39,7 @@ import {
   Shield,
   Sparkles,
   SquareFunction,
+  SquareTerminal,
   Terminal,
   Type,
   Variable,
@@ -67,6 +71,10 @@ export const VIEW_ICONS: Record<ViewId, LucideIcon> = {
   env: KeyRound,
   insights: Activity,
   release: Rocket,
+  git: GitBranch,
+  gittools: SquareTerminal,
+  actions: CirclePlay,
+  ai: Bot,
 };
 
 export const KIND_ICONS: Record<FileKind, LucideIcon> = {

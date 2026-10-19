@@ -18,6 +18,7 @@ import { VERSION } from '../version.js';
 import { analysisFingerprint } from './client.js';
 import { createDailyLoopService } from './daily-loop.js';
 import { createEngine, type Engine } from './engine.js';
+import { createGitToolsService } from './git-tools.js';
 import { createReviewService } from './review.js';
 
 export interface ServeOptions extends Omit<AnalyzeOptions, 'cache' | 'onProgress'> {
@@ -121,7 +122,8 @@ export async function serve(options: ServeOptions): Promise<LiveServer> {
   const { port: _port, host: _host, writeHistory: _history, log: _log, register: _register, onEvents: _onEvents, excludeEvents, ...rest } = options;
   // compare: `changes.delta` on every update; the base snapshot is computed once per base commit
   // (memoized), later runs only diff. release: the same for the last version tag (the Release view).
-  const analysis = { ...rest, compare: rest.compare ?? true, release: rest.release ?? true };
+  // repo / ci / ai: the Git, GitHub Actions and AI tools views (a few git processes and small files).
+  const analysis = { ...rest, compare: rest.compare ?? true, release: rest.release ?? true, repo: rest.repo ?? true, ci: rest.ci ?? true, ai: rest.ai ?? true };
 
   // The engine owns the cache, the watchers and the coalescing re-analysis queue.
   // events: the live guard compares every analysis with the previous one (a few ms).
@@ -146,6 +148,8 @@ export async function serve(options: ServeOptions): Promise<LiveServer> {
   // --- review-mode: plans of other branches / pull requests, and what the reviewer viewed ---
   const reviews = createReviewService(root, analysis);
   // --- /review-mode ---
+  // The Git tools view: search the history, read a commit, the standup, delete merged branches.
+  const gitTools = createGitToolsService({ root, onBranchesChanged: () => engine.markDirty() });
 
   const clients = new Set<http.ServerResponse>();
   const broadcast = (event: string, payload: unknown): void => {
@@ -294,6 +298,15 @@ export async function serve(options: ServeOptions): Promise<LiveServer> {
         return send(res, review.status, text, { 'Content-Type': 'application/json; charset=utf-8' });
       }
       // --- /review-mode ---
+      if (url.pathname.startsWith('/api/git/')) {
+        const git = await gitTools.handle({ method: req.method ?? 'GET', pathname: url.pathname, params: url.searchParams, loopback: isLoopbackAddress(req.socket.remoteAddress), readBody: () => readBody(req) });
+        return git ? send(res, git.status, git.body) : send(res, 404, { error: 'Not found' });
+      }
+      if (req.method === 'POST' && url.pathname === '/api/refresh') {
+        // What the watchers cannot see (a branch made in a terminal, a `.claude` edit on Linux): look again now.
+        await engine.reanalyze();
+        return send(res, 200, { version: engine.version() });
+      }
       // --- daily-loop ---
       if (req.method === 'GET' && url.pathname === '/api/status') {
         // A server for part of the project does not describe the project: status lines use their snapshot.

@@ -19,6 +19,10 @@ import { PackagesView } from './views/PackagesView';
 import { InsightsView } from './views/InsightsView';
 import { EnvView } from './views/EnvView';
 import { ReleaseView } from './views/ReleaseView';
+import { GitView } from './views/GitView';
+import { GitToolsView } from './views/GitToolsView';
+import { ActionsView } from './views/ActionsView';
+import { AiView } from './views/AiView';
 import { TodayView } from './views/TodayView';
 import { ChangesView } from './views/ChangesView';
 import { SearchView } from './views/SearchView';
@@ -44,6 +48,10 @@ const SUBTITLES: Record<ViewId, string> = {
   env: 'Environment variables the code reads, and what documents them',
   insights: 'Health score, trends, hotspots, dead code, security and risks',
   release: 'What the next release contains and the version that fits',
+  git: 'Branches to clean up, stashes, lost commits, commit style and git settings',
+  gittools: 'Commands for the situations you search for, history search, commit messages and standup',
+  actions: 'Workflows, jobs and triggers, what is wrong with them and what runs for your changes',
+  ai: 'Claude Code skills, commands, agents, MCP servers and hooks, and how to use them',
 };
 
 const FILL_VIEWS = new Set<ViewId>(['graph', 'architecture', 'structure', 'components', 'classes', 'routes', 'flow', 'search', 'activity', 'tour']);
@@ -149,6 +157,10 @@ export function App() {
             {activeView === 'env' && <EnvView />}
             {activeView === 'insights' && <InsightsView />}
             {activeView === 'release' && <ReleaseView />}
+            {activeView === 'git' && <GitView />}
+            {activeView === 'gittools' && <GitToolsView />}
+            {activeView === 'actions' && <ActionsView />}
+            {activeView === 'ai' && <AiView />}
           </div>
           {selection && <DetailPanel />}
         </div>

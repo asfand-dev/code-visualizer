@@ -3,6 +3,7 @@ import { useModel } from '../data/context';
 import { fmtCompact } from '../lib/format';
 import { navigate, setState, toggleTheme, useStore, type ViewId } from '../state/store';
 import { VIEW_ICONS } from './icons';
+import { useRepoAttention } from './RepoAttention';
 
 export interface NavEntry {
   id: ViewId;
@@ -21,6 +22,7 @@ export function useNavEntries(): NavEntry[] {
     data.insights.unusedDependencies.length +
     data.insights.missingDependencies.length;
   const changed = data.changes?.files.length ?? 0;
+  const attention = useRepoAttention(data.repo).length;
   const entries: NavEntry[] = [
     { id: 'today', label: 'Today', section: 'Workspace' },
     { id: 'changes', label: 'My changes', section: 'Workspace', count: changed || undefined },
@@ -41,6 +43,10 @@ export function useNavEntries(): NavEntry[] {
   if (model.hasGit) entries.push({ id: 'activity', label: 'Activity & team', section: 'Team & health', count: data.git?.contributors.length });
   entries.push({ id: 'insights', label: 'Health & insights', section: 'Team & health', count: issues || undefined });
   if (data.release) entries.push({ id: 'release', label: 'Release', section: 'Team & health', count: data.release.commitCount || undefined });
+  if (data.repo) entries.push({ id: 'git', label: 'Git insights', section: 'Developer tools', count: attention || undefined });
+  if (data.repo) entries.push({ id: 'gittools', label: 'Git toolbox', section: 'Developer tools' });
+  if (data.ci) entries.push({ id: 'actions', label: 'GitHub Actions', section: 'Developer tools', count: data.ci.workflows.length });
+  if (data.ai) entries.push({ id: 'ai', label: 'AI assistants', section: 'Developer tools', count: data.ai.items.length || undefined });
   return entries;
 }
 

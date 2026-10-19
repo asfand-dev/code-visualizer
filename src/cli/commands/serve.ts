@@ -30,6 +30,8 @@ ${pc.bold('Server options')}
       --notify[=<mode>]    Desktop notifications for new problems: errors (default) or all
                            (errors, warnings and fixes); at most one every 10 s
       --no-notify          No desktop notifications, whatever the configuration says
+      --no-personal-ai     The AI tools view lists only the project's own Claude Code tools,
+                           not those of ~/.claude (your skills, MCP servers, plugins)
   -h, --help               Show this help
 
   A running server is reused only when it was started with the same analysis
@@ -167,6 +169,7 @@ export const serveCommand: Command = {
         new: { type: 'boolean' },
         notify: { type: 'boolean' },
         'no-notify': { type: 'boolean' },
+        'no-personal-ai': { type: 'boolean' },
         coverage: { type: 'string', multiple: true },
         // review-mode: open My changes in reviewer mode on this ref (`review <ref> --open`).
         review: { type: 'string' },
@@ -186,7 +189,7 @@ export const serveCommand: Command = {
     let options;
     let explicit: boolean;
     try {
-      options = { ...analysisOptions(values, positionals), coverage: coveragePaths(values.coverage) };
+      options = { ...analysisOptions(values, positionals), coverage: coveragePaths(values.coverage), ...(values['no-personal-ai'] ? { ai: { personal: false } } : {}) };
       explicit = explicitRoot(values, positionals) !== undefined;
     } catch (error) {
       if (error instanceof UsageError) {

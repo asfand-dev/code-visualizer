@@ -1,4 +1,4 @@
-import type { LiveFeed, LiveUpdate, ReportData, ReviewPlan, ReviewRef, SyncReport } from '../types';
+import type { BranchDeleteResult, GitCommitDetail, GitSearchMode, GitSearchResult, GitStandupCommits, LiveFeed, LiveUpdate, ReportData, ReviewPlan, ReviewRef, SyncReport } from '../types';
 
 export interface LiveConfig {
   token: string;
@@ -83,6 +83,60 @@ export function connectLive(
     source?.close();
   };
 }
+
+// --- dev-companion: git tools of the live server ---
+
+/** The JSON answer of a git tool, or an Error with the server's reason. */
+async function toolJson<T>(res: Response): Promise<T> {
+  if (res.ok) return (await res.json()) as T;
+  let message = `Request failed (${res.status})`;
+  try {
+    message = ((await res.json()) as { error?: string }).error ?? message;
+  } catch {
+    /* not JSON */
+  }
+  throw new Error(message);
+}
+
+function requireLive(): LiveConfig {
+  const live = liveConfig();
+  if (!live) throw new Error('This needs the live companion: run code-visualizer serve.');
+  return live;
+}
+
+export async function searchHistory(mode: GitSearchMode, query: string, options: { all?: boolean } = {}): Promise<GitSearchResult> {
+  const live = requireLive();
+  const params = new URLSearchParams({ mode, q: query, ...(options.all ? { all: '1' } : {}) });
+  return toolJson(await fetch(`/api/git/search?${params}`, { headers: headers(live), cache: 'no-store' }));
+}
+
+export async function fetchCommitDetail(hash: string): Promise<GitCommitDetail> {
+  const live = requireLive();
+  return toolJson(await fetch(`/api/git/commit?hash=${encodeURIComponent(hash)}`, { headers: headers(live), cache: 'no-store' }));
+}
+
+export async function fetchStandup(days: number): Promise<GitStandupCommits> {
+  const live = requireLive();
+  return toolJson(await fetch(`/api/git/standup?days=${days}`, { headers: headers(live), cache: 'no-store' }));
+}
+
+/** Delete local branches the server finds merged (it checks again; the answer says what it refused and why). */
+export async function deleteBranches(branches: string[]): Promise<BranchDeleteResult> {
+  const live = requireLive();
+  return toolJson(await fetch('/api/git/delete-branches', { method: 'POST', headers: headers(live, { 'Content-Type': 'application/json' }), body: JSON.stringify({ branches }) }));
+}
+
+/** Look at the repository again now (a branch made in a terminal, an edit of `.claude` the watchers missed). */
+export async function refreshAnalysis(): Promise<boolean> {
+  const live = liveConfig();
+  if (!live) return false;
+  try {
+    return (await fetch('/api/refresh', { method: 'POST', headers: headers(live) })).ok;
+  } catch {
+    return false;
+  }
+}
+// --- /dev-companion ---
 
 /** Ask the live server to open a file in the editor. Returns false when unavailable. */
 export async function openInEditor(file: string, line: number | undefined, editor: string): Promise<boolean> {

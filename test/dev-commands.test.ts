@@ -237,3 +237,135 @@ describe.runIf(hasGit)('release command', () => {
     expect(stdout).toContain('--since');
   });
 });
+
+const CI_WORKFLOW = `name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm run lint
+  build:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm run missing-script
+`;
+
+const NIGHTLY_WORKFLOW = `name: Nightly
+on:
+  schedule:
+    - cron: '0 3 * * *'
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - run: npm audit
+`;
+
+/** Two workflows: CI runs a script package.json does not have (an error), Nightly is fine. */
+function actionsProject(withErrors = true): string {
+  const root = makeTempDir('cv-actions-cli-');
+  writeFile(root, 'package.json', JSON.stringify({ name: 'app', scripts: { lint: 'eslint .', audit: 'npm audit' } }));
+  writeFile(root, 'src/a.ts', 'export const a = 1;\n');
+  writeFile(root, '.github/workflows/ci.yml', withErrors ? CI_WORKFLOW : CI_WORKFLOW.replace('missing-script', 'lint'));
+  writeFile(root, '.github/workflows/nightly.yml', NIGHTLY_WORKFLOW);
+  return root;
+}
+
+describe('actions command', () => {
+  it('shows when each workflow runs, how its jobs connect and what is wrong', async () => {
+    const { code, stdout } = await cli('actions', '--root', actionsProject());
+    expect(code).toBe(0);
+    expect(stdout).toContain('2 workflows · 3 jobs');
+    expect(stdout).toMatch(/CI .*\.github\/workflows\/ci\.yml/);
+    expect(stdout).toContain('runs on push (branches main), pull_request');
+    expect(stdout).toContain('jobs    lint → build');
+    expect(stdout).toContain('runs on schedule');
+    expect(stdout).toMatch(/✖ ci\.yml:\d+  build: .*missing-script/);
+  });
+
+  it('lists only what is asked for with --workflow, by file name or name', async () => {
+    const root = actionsProject();
+    for (const query of ['nightly', 'nightly.yml', 'NIGHTLY']) {
+      const { code, stdout } = await cli('actions', '--root', root, '--workflow', query);
+      expect(code).toBe(0);
+      expect(stdout).toContain('1 workflow · 1 job');
+      expect(stdout).not.toContain('missing-script');
+    }
+    const unknown = await cli('actions', '--root', root, '--workflow', 'deploy');
+    expect(unknown.code).toBe(2);
+    expect(unknown.stderr).toContain('No workflow "deploy". Found: ci.yml, nightly.yml.');
+  });
+
+  it('fails --check on an error and passes without one', async () => {
+    expect((await cli('actions', '--root', actionsProject(), '--check')).code).toBe(1);
+    expect((await cli('actions', '--root', actionsProject(false), '--check')).code).toBe(0);
+    expect((await cli('actions', '--root', actionsProject(), '--workflow', 'nightly', '--check')).code).toBe(0);
+  });
+
+  it('prints the findings and workflows as JSON', async () => {
+    const { code, stdout } = await cli('actions', '--root', actionsProject(), '--json');
+    expect(code).toBe(0);
+    const report = JSON.parse(stdout);
+    expect(report.ok).toBe(false);
+    expect(report.workflows.map((w: { name: string }) => w.name)).toEqual(['CI', 'Nightly']);
+    expect(report.findings.some((f: { rule: string }) => f.rule === 'missing-script')).toBe(true);
+  });
+
+  it('draws the job graph of one workflow as Mermaid, to the terminal or to a file', async () => {
+    const root = actionsProject();
+    const { code, stdout } = await cli('actions', '--root', root, '--workflow', 'ci', '--mermaid');
+    expect(code).toBe(0);
+    expect(stdout).toContain('flowchart LR');
+    expect(stdout).toContain('j0 --> j1');
+    const target = path.join(makeTempDir('cv-actions-out-'), 'ci.mmd');
+    expect((await cli('actions', '--root', root, '--workflow', 'ci', '--mermaid', '--output', target)).code).toBe(0);
+    expect(fs.readFileSync(target, 'utf8')).toContain('flowchart LR');
+  });
+
+  it('asks for one workflow when --mermaid has several', async () => {
+    const { code, stderr } = await cli('actions', '--root', actionsProject(), '--mermaid');
+    expect(code).toBe(2);
+    expect(stderr).toContain('pick one with --workflow (ci.yml, nightly.yml)');
+  });
+
+  it('says so when there are no workflows', async () => {
+    const root = makeTempDir('cv-actions-none-');
+    writeFile(root, 'package.json', JSON.stringify({ name: 'app' }));
+    writeFile(root, 'src/a.ts', 'export const a = 1;\n');
+    const plain = await cli('actions', '--root', root, '--check');
+    expect(plain.code).toBe(0);
+    expect(plain.stdout).toContain('No GitHub Actions workflows found');
+    expect(JSON.parse((await cli('actions', '--root', root, '--json')).stdout)).toMatchObject({ ok: true, workflows: [], findings: [] });
+    expect((await cli('actions', '--root', root, '--mermaid')).code).toBe(2);
+  });
+
+  it('reports a workflow that is not valid YAML', async () => {
+    const root = actionsProject();
+    writeFile(root, '.github/workflows/broken.yml', 'name: Broken\non: push\njobs:\n  a:\n    steps: [\n');
+    const { code, stdout } = await cli('actions', '--root', root, '--check');
+    expect(code).toBe(1);
+    expect(stdout).toMatch(/Not valid YAML \(line \d+\)/);
+  });
+
+  it('rejects options that do not fit together', async () => {
+    const root = actionsProject();
+    expect((await cli('actions', '--root', root, '--output', 'x')).code).toBe(2);
+    expect((await cli('actions', '--root', root, '--copy')).code).toBe(2);
+    expect((await cli('actions', '--root', root, '--mermaid', '--json')).code).toBe(2);
+  });
+
+  it('prints its help', async () => {
+    const { code, stdout } = await cli('actions', '--help');
+    expect(code).toBe(0);
+    expect(stdout).toContain('code-visualizer actions');
+    expect(stdout).toContain('--mermaid');
+  });
+});

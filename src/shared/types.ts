@@ -1911,3 +1911,411 @@ export interface ReportData {
   /** What the next release contains (only with the `release` analysis option: `serve` and `report`). */
   release?: ReleasePlan;
 }
+
+// --- dev-companion: git insights, GitHub Actions workflows, AI assistant tools ---
+
+/** A local or remote-tracking branch with its distance from the base branch (`RepoInsights.branches`). */
+export interface BranchInfo {
+  /** `feature/login`, or `origin/feature/login` for a remote-tracking branch. */
+  name: string;
+  remote: boolean;
+  current?: boolean;
+  /** Short hash of the tip. */
+  hash: string;
+  /** Committer date of the tip (ms). */
+  date: number;
+  author: string;
+  subject: string;
+  upstream?: string;
+  /** Commits the branch has that the base branch does not. */
+  ahead: number;
+  /** Commits the base branch has that the branch does not. */
+  behind: number;
+  /** Every commit of the branch is already in the base branch: deleting it loses nothing. */
+  merged: boolean;
+  /** The remote branch this one tracked was deleted. */
+  gone?: boolean;
+  /** Commits not yet pushed to its upstream. */
+  unpushed?: number;
+  /** Checked out in another worktree (absolute path). */
+  worktree?: string;
+  /** The base branch, the current branch or one checked out in a worktree: never offered for deletion. */
+  protected?: boolean;
+}
+
+export interface StashInfo {
+  /** `stash@{0}`. */
+  ref: string;
+  message: string;
+  /** Date of the stash (ms). */
+  date: number;
+  /** Files in the stash (capped; see `fileCount`). */
+  files: string[];
+  fileCount: number;
+}
+
+export interface WorktreeInfo {
+  path: string;
+  branch?: string;
+  head?: string;
+  detached?: boolean;
+  locked?: boolean;
+  /** The folder is gone: `git worktree prune` removes the record. */
+  prunable?: boolean;
+  /** The main working tree. */
+  main?: boolean;
+}
+
+/** A commit no branch, tag or remote reaches any more; only the reflog remembers it (lost work). */
+export interface RescueCommit {
+  hash: string;
+  date: number;
+  author: string;
+  subject: string;
+}
+
+/** How the team writes commit messages (`RepoInsights.style`, from the latest commits). */
+export interface CommitStyle {
+  analyzed: number;
+  merges: number;
+  /** Subjects that follow Conventional Commits (`type(scope): text`). */
+  conventional: number;
+  types: Partial<Record<CommitType, number>>;
+  withBody: number;
+  /** Subjects longer than 72 characters. */
+  longSubjects: number;
+  /** `wip`, `fixup!`, `squash!`, `tmp`… commits that probably should not be in the history. */
+  wip: number;
+  reverts: number;
+  /** Subjects that end in a pull request number (`(#123)`). */
+  prRefs: number;
+  coAuthored: number;
+  /** Average subject length in characters. */
+  avgSubject: number;
+}
+
+export type UnwantedKind = 'secret' | 'dependency' | 'build' | 'junk';
+
+/** What is tracked in the repository that should not be, and how heavy it is. */
+export interface GitHygiene {
+  trackedFiles: number;
+  /** A file, or a whole folder (`node_modules/`, with the number of files in it as `count`). */
+  unwanted: { path: string; kind: UnwantedKind; count?: number }[];
+  /** The biggest tracked files over the size limit, biggest first. */
+  large: { path: string; size: number }[];
+  /** `git count-objects -v`: size of the packs, and loose objects that `git gc` would pack. */
+  objects: { packKiB: number; looseKiB: number; loose: number; packs: number };
+  gitignore: boolean;
+}
+
+/** A recommended git setting and what it is now. Only whitelisted keys are ever read; no values of other keys are kept. */
+export interface ConfigAdvice {
+  key: string;
+  label: string;
+  /** `ok`: set as recommended (or to something equivalent); `missing`: not set; `differs`: set to another value. */
+  status: 'ok' | 'missing' | 'differs';
+  /** The current value (never kept for the e-mail address: `set` says whether it exists). */
+  value?: string;
+  recommended?: string;
+  why: string;
+  /** Ready-to-paste command that applies the recommendation. */
+  command?: string;
+  /** Without it git cannot work properly (user.name, user.email). */
+  essential?: boolean;
+}
+
+export interface RepoInsights {
+  /** The branch the others are compared with (`main`, `master`, or the remote's default). */
+  base: string;
+  /** Local branches first (newest first), then remote ones; capped (see `branchTotals` for real numbers). */
+  branches: BranchInfo[];
+  /** `false` with git older than 2.41: the branches carry no ahead / behind counts (merged or not is still known). */
+  aheadBehind: boolean;
+  branchTotals: { local: number; remote: number; merged: number; gone: number };
+  stashes: StashInfo[];
+  worktrees: WorktreeInfo[];
+  /** Commits only the reflog still has, newest first (capped). */
+  rescue: RescueCommit[];
+  style: CommitStyle;
+  hygiene: GitHygiene;
+  config: ConfigAdvice[];
+}
+
+export interface ReportData {
+  /** Branches, stashes, lost commits, commit style and git settings (only with the `repo` analysis option). */
+  repo?: RepoInsights;
+}
+
+/** One entry of the git "needs attention" list (`repoAttention` in src/shared/git-insights.ts). */
+export interface RepoAttention {
+  id: string;
+  severity: 'high' | 'medium' | 'low';
+  title: string;
+  detail?: string;
+  /** Command that fixes it (copyable). */
+  command?: string;
+}
+
+/** A GitHub Actions event that starts a workflow, with its filters. */
+export interface WorkflowTrigger {
+  event: string;
+  branches?: string[];
+  branchesIgnore?: string[];
+  tags?: string[];
+  tagsIgnore?: string[];
+  paths?: string[];
+  pathsIgnore?: string[];
+  /** Activity types (`opened`, `synchronize`, `published`…). */
+  types?: string[];
+  /** `schedule`: cron expressions (UTC). */
+  cron?: string[];
+  /** `workflow_dispatch` / `workflow_call`: input names. */
+  inputs?: string[];
+  /** `workflow_run`: the workflows it follows. */
+  workflows?: string[];
+}
+
+export interface WorkflowStep {
+  line: number;
+  name?: string;
+  id?: string;
+  uses?: string;
+  /** The command (secrets masked, cut at 400 characters). */
+  run?: string;
+  shell?: string;
+  if?: string;
+  /** `with:` inputs of an action (only plain values; secrets masked, cut at 160 characters). */
+  with?: Record<string, string>;
+  workingDirectory?: string;
+  continueOnError?: boolean;
+}
+
+export interface WorkflowMatrix {
+  dims: { name: string; values: string[] }[];
+  /** Jobs the matrix creates (an estimate when `dynamic`). */
+  combos: number;
+  /** A dimension comes from an expression (`fromJSON(...)`), so its size is unknown. */
+  dynamic?: boolean;
+  includes: number;
+  excludes: number;
+  failFast?: boolean;
+}
+
+export interface WorkflowJob {
+  id: string;
+  name?: string;
+  line: number;
+  runsOn: string[];
+  needs: string[];
+  /** A reusable workflow this job calls (`uses: org/repo/.github/workflows/x.yml@v1` or `./.github/workflows/x.yml`). */
+  uses?: string;
+  if?: string;
+  matrix?: WorkflowMatrix;
+  /** `read-all`, `write-all`, or `contents: write, id-token: write`. */
+  permissions?: string;
+  timeoutMinutes?: number;
+  environment?: string;
+  container?: string;
+  services: string[];
+  outputs: string[];
+  steps: WorkflowStep[];
+  /** Node.js versions its `actions/setup-node` steps install, resolved through the matrix. */
+  nodeVersions?: string[];
+  continueOnError?: boolean;
+  concurrency?: boolean;
+}
+
+export interface WorkflowInfo {
+  /** Path from the repository root (`.github/workflows/ci.yml`). */
+  file: string;
+  name: string;
+  triggers: WorkflowTrigger[];
+  jobs: WorkflowJob[];
+  permissions?: string;
+  concurrency?: boolean;
+  /** Names of the variables the workflow sets (values are never kept). */
+  env: string[];
+  /** `secrets.X` and `vars.X` it reads. */
+  secrets: string[];
+  variables: string[];
+  /** Node versions its `actions/setup-node` steps install, resolved through matrices (`20`, `22.x`). */
+  nodeVersions?: string[];
+  lines: number;
+  /** The file is not valid YAML. */
+  error?: { message: string; line: number };
+}
+
+export type WorkflowSeverity = 'error' | 'warning' | 'info';
+
+export interface WorkflowFinding {
+  /** `script-injection`, `unpinned-action`, `missing-script`… (WORKFLOW_RULES in src/shared/workflows.ts). */
+  rule: string;
+  severity: WorkflowSeverity;
+  file: string;
+  line?: number;
+  job?: string;
+  message: string;
+}
+
+export type ActionPin = 'sha' | 'tag' | 'branch' | 'none';
+
+/** An action (or reusable workflow) the workflows use, with the versions in use. */
+export interface ActionUse {
+  /** `actions/checkout`, `./.github/actions/setup`, `docker://alpine`. */
+  name: string;
+  kind: 'marketplace' | 'local' | 'docker' | 'reusable';
+  /** First-party: `actions/*` and `github/*`. */
+  official: boolean;
+  versions: { ref: string; pin: ActionPin; count: number }[];
+  count: number;
+  workflows: string[];
+}
+
+export interface LocalAction {
+  /** Folder from the repository root (`.github/actions/setup`). */
+  path: string;
+  name?: string;
+  description?: string;
+  inputs: string[];
+  usedBy: number;
+}
+
+/** A package.json script and where CI runs it. */
+export interface ScriptUse {
+  name: string;
+  command?: string;
+  runs: { file: string; job: string; line?: number }[];
+}
+
+export interface CiReport {
+  /** The analyzed root relative to the repository root (`''` when they are the same folder). */
+  base: string;
+  workflows: WorkflowInfo[];
+  actions: ActionUse[];
+  localActions: LocalAction[];
+  scripts: ScriptUse[];
+  findings: WorkflowFinding[];
+  dependabot?: { file: string; ecosystems: { name: string; directory: string; interval?: string }[] };
+  /** Node versions the workflows test, resolved through matrices when possible. */
+  nodeVersions: string[];
+}
+
+export interface ReportData {
+  /** GitHub Actions workflows, how they connect and what is wrong with them (only with the `ci` analysis option). */
+  ci?: CiReport;
+}
+
+export type AiItemKind = 'memory' | 'skill' | 'command' | 'agent' | 'mcp' | 'hook' | 'plugin';
+
+/** `project`: committed with the repository; `local`: your own, git-ignored files in it; `user`: from `~/.claude`; `plugin`: from an installed plugin. */
+export type AiScope = 'project' | 'local' | 'user' | 'plugin';
+
+export interface AiItem {
+  kind: AiItemKind;
+  scope: AiScope;
+  name: string;
+  description?: string;
+  /** Where it is defined: project-relative, or starting with `~/`. */
+  path: string;
+  /** What to type to use it: `/review-pr [number]`, `@code-reviewer`. */
+  invoke?: string;
+  /** When and how to use it, in a sentence or two. */
+  usage: string;
+  plugin?: string;
+  /** Tools it is allowed to use. */
+  tools?: string[];
+  model?: string;
+  /** Claude may start it on its own (skills, agents). */
+  auto?: boolean;
+  lines?: number;
+  /** Rough size when loaded into the context window (characters / 4). */
+  tokens?: number;
+  /** How often Claude Code recorded using it (from `~/.claude.json`). */
+  uses?: { count: number; last: number };
+  /** Type of a server (`stdio`, `http`), hook event, matcher… */
+  detail?: string;
+  warning?: string;
+}
+
+/** Instructions written for another assistant (`AGENTS.md`, `.cursor/rules`, Copilot, Gemini…). */
+export interface AiInstructionFile {
+  tool: string;
+  path: string;
+  lines: number;
+  tokens: number;
+}
+
+export interface ToolCheck {
+  id: string;
+  ok: boolean;
+  label: string;
+  detail?: string;
+  /** A command or a short instruction that fixes it. */
+  fix?: string;
+}
+
+export interface AiCatalog {
+  items: AiItem[];
+  instructions: AiInstructionFile[];
+  /** Counts of the allow / deny / ask permission rules, and the default mode, from the project's Claude settings. */
+  permissions?: { allow: number; deny: number; ask: number; mode?: string };
+  checks: ToolCheck[];
+  /** Items of `~/.claude` and installed plugins are included (opt out with `--no-personal-ai`). */
+  personal: boolean;
+  /** Rough tokens Claude loads at the start of every session (memory files and skill descriptions). */
+  startupTokens: number;
+}
+
+export interface ReportData {
+  /** Claude Code skills, commands, agents, MCP servers and hooks available here, and how to use them (only with the `ai` analysis option). */
+  ai?: AiCatalog;
+}
+
+/** How `GET /api/git/search` looks through the history. */
+export type GitSearchMode = 'text' | 'regex' | 'message' | 'author' | 'file';
+
+export interface GitSearchCommit {
+  hash: string;
+  date: number;
+  author: string;
+  subject: string;
+  /** The files it changed (the first few). */
+  files: string[];
+  fileCount: number;
+}
+
+export interface GitSearchResult {
+  mode: GitSearchMode;
+  query: string;
+  commits: GitSearchCommit[];
+  /** More commits match than were returned. */
+  truncated: boolean;
+}
+
+/** `GET /api/git/commit`: one commit, with what it changed. */
+export interface GitCommitDetail {
+  hash: string;
+  parents: string[];
+  date: number;
+  author: string;
+  subject: string;
+  body: string;
+  files: { path: string; additions: number; deletions: number; binary?: boolean }[];
+  fileCount: number;
+  additions: number;
+  deletions: number;
+  /** Branches that contain it (the first few). */
+  containedIn: string[];
+}
+
+/** `GET /api/git/standup`: your commits of the last days, from every branch. */
+export interface GitStandupCommits {
+  user?: string;
+  commits: { hash: string; date: number; author: string; subject: string }[];
+}
+
+/** `POST /api/git/delete-branches`: what was deleted (with the commit, so it can be restored) and what was refused. */
+export interface BranchDeleteResult {
+  deleted: { name: string; hash: string }[];
+  refused: { name: string; reason: string }[];
+}

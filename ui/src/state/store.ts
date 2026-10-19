@@ -18,9 +18,13 @@ export type ViewId =
   | 'packages'
   | 'env'
   | 'insights'
-  | 'release';
+  | 'release'
+  | 'git'
+  | 'gittools'
+  | 'actions'
+  | 'ai';
 
-export const VIEW_IDS: ViewId[] = ['today', 'changes', 'search', 'activity', 'overview', 'tour', 'graph', 'architecture', 'structure', 'components', 'classes', 'routes', 'flow', 'packages', 'env', 'insights', 'release'];
+export const VIEW_IDS: ViewId[] = ['today', 'changes', 'search', 'activity', 'overview', 'tour', 'graph', 'architecture', 'structure', 'components', 'classes', 'routes', 'flow', 'packages', 'env', 'insights', 'release', 'git', 'gittools', 'actions', 'ai'];
 
 export type SelectionType = 'file' | 'symbol' | 'folder' | 'package' | 'route';
 

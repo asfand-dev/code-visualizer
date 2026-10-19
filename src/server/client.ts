@@ -47,6 +47,8 @@ export function analysisFingerprint(root: string, options: Omit<AnalyzeOptions, 
     base: options.base ?? null,
     // test-intelligence: explicit coverage reports (`--coverage <path>`); the default leaves the fingerprint as it was.
     ...(options.coverage !== undefined ? { coverage: options.coverage === false ? false : [...new Set(options.coverage.map((p) => path.resolve(root, p)))].sort() } : {}),
+    // dev-tools: a run that must not read `~/.claude` (`--no-personal-ai`) never takes a report that did.
+    ...(options.ai === false || (typeof options.ai === 'object' && options.ai.personal === false) ? { personalAi: false } : {}),
   });
 }
 

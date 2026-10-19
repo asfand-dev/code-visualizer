@@ -12,7 +12,7 @@ Grouped as in `code-visualizer --help`; `cviz` is a short alias of `code-visuali
 
 - **Ask**: `who`, `uses` (alias `refs`), `impact`, `path`, `route`, `tests-for` and `similar` — all with `--json`, fuzzy targets with “did you mean” and exit codes 0 / 1 not found / 2 usage.
 - **Everyday**: `test` (run exactly the affected tests), `coverage` (patch coverage), `status` (shell prompt, tmux and agent status lines), `sync` (what the base branch and teammates bring before a rebase) and `env` (environment variables the code reads vs. your `.env` files, `--example` writes a `.env.example`, `--check` for CI).
-- **Review & CI**: `diff [base] [head]` (architecture changes between refs, your branch or staged work, `--fail-on …`), `review [ref|#123|!45]` (review any branch, PR or MR in dependency order without checking it out) and `release [--since <ref>] [--notes] [--check]` (commits and published-API changes since the last tag, the version that fits, release notes).
+- **Review & CI**: `diff [base] [head]` (architecture changes between refs, your branch or staged work, `--fail-on …`), `review [ref|#123|!45]` (review any branch, PR or MR in dependency order without checking it out) and `release [--since <ref>] [--notes] [--check]` (commits and published-API changes since the last tag, the version that fits, release notes) and `actions [--workflow <name>] [--mermaid] [--check]` (GitHub Actions workflows: triggers, job graph, findings).
 - **AI agents**: `mcp` (MCP server over stdio, `--print-config claude|cursor|vscode|codex|gemini`), `agents init|doctor|remove` and `hook <session-start|pre-edit|post-edit|stop>`.
 - **Setup**: `cache [status|clear]` and `hooks install|uninstall|status`.
 - `context --agents [--write] [--claude]` maintains a managed project-map block in AGENTS.md; `pr` gains `--format comment`, `--check` and `--coverage`; `serve` gains `--notify` and `--new`; analysis commands gain `--no-cache` and `--coverage <path>`.
@@ -74,6 +74,17 @@ Grouped as in `code-visualizer --help`; `cviz` is a short alias of `code-visuali
 - **Packages** shows the license and the install scripts of each direct dependency, with a *License review* list for copyleft, weak copyleft, proprietary and unknown licenses.
 - New exports: `envExampleText`, `envStatus`, `releaseNotesMarkdown`, `planCycleFix` and `licenseRisk`; the data is `data.env`, `data.release`, `data.insights.risks`, `data.packages[].licenseRisk` and `data.files[].escapes`.
 
+### Git, GitHub Actions & AI tools
+
+A **Developer tools** section in the browser (`serve` and `report`), read from plain files and `git` on your machine (no network, no token):
+
+- **Git insights**: branches merged into the base (delete them in two clicks in `serve`, with the undo commands), branches whose remote is gone, never pushed, unpushed or untouched for 90+ days; stashes; worktrees; **commits no branch has any more** with the command that rescues them; commit style; repository hygiene (tracked secrets, dependencies and build output, large files, loose objects) and recommended git settings. The most important chores also appear on **Today** as **Repository care**.
+- **Git toolbox**: 40 recipes for the situations people search for, with your branch and base filled in, a risk label each and the ones that fit right now on top; a **commit message helper** (suggest from your changes, Conventional Commits lint, change the type), a **standup** and, in `serve`, **history search** (text added or removed, regex, message, author, history of one file) with commit details, the branches that contain a commit and the commands to show, revert or cherry-pick it.
+- **GitHub Actions** view and `actions` command: every workflow as a job graph (`needs`, matrices, environments, reusable workflows), its triggers and cron schedules, a **forecast of what runs for your changes**, findings from the common rules (script injection, unpinned third-party actions, missing `permissions`, scripts `package.json` does not define, outdated actions, Node.js past end of life, no timeout or concurrency, invalid YAML), the actions in use and how they are pinned, `package.json` scripts CI never runs, local actions, Dependabot and the secrets read. `actions --mermaid` prints a graph for a README; `actions --check` fails CI on errors.
+- **AI assistants** view: the Claude Code **skills, slash commands, subagents, MCP servers, hooks, plugins** and memory files of the project and of `~/.claude`, with what each does, how to call it and when Claude uses it by itself; a guide to using Claude Code, starter templates written for the project, a setup check with fixes and the code-visualizer tools an agent can call. `--no-personal-ai` (`report`, `serve`) leaves `~/.claude` out of a report you share. Only names, descriptions and paths are read: never file contents, MCP arguments, headers or environment.
+- `serve` gains `POST /api/refresh` (the views also refresh when you return to the tab and have a **Refresh** button), `GET /api/git/search`, `/api/git/commit` and `/api/git/standup`, and `POST /api/git/delete-branches` (loopback only; `git branch --delete` of merged branches only, re-checked on the server, never `-D`, and the hash of each deleted branch is returned for undo).
+- New exports: `analyzeRepo`, `analyzeCi`, `analyzeAi`, `repoAttention`, `deletableBranches`, `lintCommitMessage`, `suggestCommit`, `standupMarkdown`, `gitRecipes`, `parseWorkflow`, `buildCiReport`, `forecastRuns`, `workflowMermaid`, `CLAUDE_GUIDE` and `guideTemplates`; the data is `data.repo`, `data.ci` and `data.ai`.
+
 ### Status line, git hooks & sync
 
 - `status` never analyzes inline: it asks a running `serve` or prints the stored snapshot and refreshes it in the background (about 40 ms, exit 0; 2 only for a mistyped option). It notices a fetched base and newer `sync` results, shows `tests ✔` only when the last passing run covered every required test, and labels `patch` vs. `cov` coverage and stale reports.
@@ -107,7 +118,8 @@ Grouped as in `code-visualizer --help`; `cviz` is a short alias of `code-visuali
 
 ### Security
 
-- The live server binds to `127.0.0.1`, requires a per-session token for every API call and rejects foreign `Host` headers. `POST /api/whatif` is loopback-only; review state is stored at mode 0600.
+- The live server binds to `127.0.0.1`, requires a per-session token for every API call and rejects foreign `Host` headers. `POST /api/whatif` and `POST /api/git/delete-branches` are loopback-only; review state is stored at mode 0600.
+- The git tools of the live server pass your text as the value of one option (never a separate argument), never use a shell, limit the length and number of searches and stop a search after 20 seconds.
 - `server.json`, caches, snapshots, `state.json` and agent session files are trusted only when they are private to the current user; caches are signed with a per-user key, so a cache that comes with a repository is never used.
 - `agents doctor` runs only code-visualizer itself unless `--run-registered` is passed. Setup commands preview their changes, never write through symlinks that lead out of the project, and git refs are validated before they reach git. Repository strings printed to the terminal have control characters made visible.
 

@@ -1230,6 +1230,7 @@ table.table {
   border-bottom: 1px solid var(--border);
   padding: 0 12px;
   overflow-x: auto;
+  max-width: 100%;
   flex-shrink: 0;
 }
 
@@ -3002,3 +3003,260 @@ svg text {
   }
 }
 /* --- /review-mode --- */
+
+/* --- dev-companion: Git insights and toolbox, GitHub Actions, AI assistants --- */
+
+/* Commands to copy: the button sits in the corner, long lines wrap. */
+.cmd {
+  position: relative;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  min-width: 0;
+}
+
+.cmd pre {
+  margin: 0;
+  padding: 9px 44px 9px 12px;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text-2);
+}
+
+.cmd .btn {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+}
+
+.attention {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.attention:first-child {
+  padding-top: 0;
+}
+
+.attention:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+/* Branch cleanup (live): the branches that will go, as ticked chips. */
+.cleanup-pick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.cleanup-pick .chip {
+  cursor: pointer;
+  max-width: 260px;
+}
+
+.cleanup-pick .chip input {
+  margin: 0;
+  accent-color: var(--danger);
+}
+
+.cleanup-pick .chip.keep {
+  opacity: 0.55;
+}
+
+.cleanup-pick .chip.keep .mono {
+  text-decoration: line-through;
+}
+
+/* Recipes: cards in a responsive grid. */
+.recipes {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr));
+  gap: 14px;
+}
+
+.recipe {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  min-width: 0;
+}
+
+.recipe .cmd {
+  margin-top: auto;
+}
+
+.card.suggested {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+
+/* History search results */
+.search-result + .search-result {
+  border-top: 1px solid var(--border);
+}
+
+.commit-body {
+  margin: 0;
+  padding: 8px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Workflow job graph: columns of jobs, joined by the `needs` lines the component measures and draws. */
+.dag-scroll {
+  overflow-x: auto;
+  padding-bottom: 6px;
+}
+
+.dag {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 56px;
+  width: max-content;
+  min-width: 100%;
+  padding: 4px 2px;
+}
+
+.dag-edges {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.dag-edges path {
+  fill: none;
+  stroke: var(--text-faint);
+  stroke-width: 1.4;
+}
+
+.dag-column {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 230px;
+  flex-shrink: 0;
+}
+
+.dag-job {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 9px 11px;
+  min-width: 0;
+}
+
+.dag-job.has-error {
+  border-color: color-mix(in srgb, var(--danger) 60%, var(--border));
+}
+
+.dag-job.has-warning {
+  border-color: color-mix(in srgb, var(--warning) 55%, var(--border));
+}
+
+.dag-job-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.dag-job-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin: 6px 0 0 19px;
+}
+
+.dag-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 0 0;
+  padding: 8px 0 0 28px;
+  border-top: 1px solid var(--border);
+  color: var(--text-2);
+}
+
+.dag-steps li {
+  min-width: 0;
+}
+
+/* AI assistants */
+.ai-items {
+  display: flex;
+  flex-direction: column;
+}
+
+.ai-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  min-width: 0;
+}
+
+.ai-item:last-child {
+  border-bottom: 0;
+}
+
+.guide-entry {
+  display: grid;
+  grid-template-columns: minmax(120px, 200px) minmax(0, 1fr);
+  gap: 4px 14px;
+}
+
+.template-body {
+  margin: 0;
+  padding: 12px 14px;
+  max-height: 320px;
+  overflow: auto;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 760px) {
+  .guide-entry {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .dag-column {
+    width: 200px;
+  }
+
+  .dag {
+    gap: 40px;
+  }
+}
+/* --- /dev-companion --- */

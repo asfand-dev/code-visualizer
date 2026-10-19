@@ -51,6 +51,7 @@ import { loadDiskCache, loadGitCache, saveDiskCache, saveGitCache } from './disk
 import { joinRoute, MAX_SITES, parseSource, toPascalCase, type CallSiteFact, type ParsedFile, type RawRoute } from './parse.js';
 import { loadProject, nearestManifest, readJson, toPosix, type PackageJson, type ProjectContext } from './project.js';
 import { projectFiles, readTextFromOverlay, type ReadText } from './readtext.js';
+import type { RepoMemo } from './repo.js';
 import { ModuleResolver, packageNameOf, SOURCE_EXTENSIONS } from './resolve.js';
 import { detectFileRoutes, type FileRole } from './routes.js';
 
@@ -145,6 +146,19 @@ export interface AnalyzeOptions {
    * commit instead of the latest version tag.
    */
   release?: boolean | { since?: string };
+  /**
+   * dev-tools: read the repository's branches, stashes, worktrees, lost commits, commit style, tracked-file
+   * hygiene and git settings as `repo`. A few git processes (the commit-bound part is kept between runs), so
+   * only `serve` and `report` ask for it.
+   */
+  repo?: boolean;
+  /** dev-tools: read the GitHub Actions workflows, local actions and Dependabot setup as `ci` (plain files, no network). */
+  ci?: boolean;
+  /**
+   * dev-tools: list the Claude Code tools (CLAUDE.md, skills, commands, subagents, MCP servers, hooks) as `ai`.
+   * `personal: false` reads nothing outside the project (no `~/.claude`, no plugins); `home` is for tests.
+   */
+  ai?: boolean | { personal?: boolean; home?: string };
   onProgress?: (stage: AnalyzeStage, detail?: { done?: number; total?: number }) => void;
 }
 
@@ -179,6 +193,8 @@ export interface AnalyzeCache {
   codeLines?: Map<string, Set<number>>;
   /** Meaningful lines of each changed file's diff (review-mode's reading order), by the same identity. */
   meaningfulLines?: Map<string, number>;
+  /** Tracked-file hygiene and commit style of the last `repo` analysis: they only change with a commit. */
+  repo?: RepoMemo;
 }
 
 export function createAnalyzeCache(): AnalyzeCache {
@@ -1821,6 +1837,37 @@ export async function analyze(options: AnalyzeOptions = {}): Promise<ReportData>
       });
     } catch (error) {
       warnings.push(`Could not plan the release: ${(error as Error).message}`);
+    }
+  }
+
+  // dev-tools: git insights, GitHub Actions and Claude Code tools. Like the release plan, they describe the whole
+  // project as it is now, so a scoped report or a snapshot of another ref has none.
+  if (scope.type === 'project' && !overlay) {
+    if (options.repo && git) {
+      try {
+        const { analyzeRepo } = await import('./repo.js');
+        const repo = await analyzeRepo(root, { branch: git.info.branch, memo: cache ? (cache.repo ??= {}) : undefined });
+        if (repo) partial.repo = repo;
+      } catch (error) {
+        warnings.push(`Could not read the git repository: ${(error as Error).message}`);
+      }
+    }
+    if (options.ci) {
+      try {
+        const { analyzeCi } = await import('./workflows.js');
+        const ci = analyzeCi(root, { pkg: ctx.pkg, workspaces: ctx.workspaces.map((w) => w.pkg) });
+        if (ci) partial.ci = ci;
+      } catch (error) {
+        warnings.push(`Could not read the GitHub Actions setup: ${(error as Error).message}`);
+      }
+    }
+    if (options.ai) {
+      try {
+        const { analyzeAi } = await import('./ai.js');
+        partial.ai = await analyzeAi(root, typeof options.ai === 'object' ? options.ai : {});
+      } catch (error) {
+        warnings.push(`Could not list the AI tools: ${(error as Error).message}`);
+      }
     }
   }
 
