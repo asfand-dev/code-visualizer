@@ -1,6 +1,6 @@
 {
   "name": "code-visualizer",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Your codebase companion for JavaScript/TypeScript, in the browser, the terminal and your AI agent: a live dependency map, impact and call sites, affected tests and patch coverage, review order, new-only CI gates (SARIF, GitLab), git hooks, a status line and an MCP server for Claude Code, Cursor and Codex.",
   "keywords": [
     "code-visualizer",
